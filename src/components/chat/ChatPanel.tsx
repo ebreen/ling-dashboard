@@ -10,7 +10,7 @@ const ChatPanel = () => {
   const [activeTab, setActiveTab] = useState('CHAT');
   const [messages, setMessages] = useState<Message[]>(demoMessages);
   const [isTyping, setIsTyping] = useState(false);
-  const { baseUrl, apiStatus } = useAPI();
+  const { wsStatus, wsSend } = useAPI();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -21,79 +21,69 @@ const ChatPanel = () => {
     scrollToBottom();
   }, [messages]);
 
-  const handleSendMessage = async (content: string) => {
-    // Add user message
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      author: 'you',
-      content,
-      timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
-    };
-    
-    setMessages(prev => [...prev, userMessage]);
-    setIsTyping(true);
-
-    if (apiStatus === 'connected') {
+  // Listen for WebSocket messages
+  useEffect(() => {
+    const handleWebSocketMessage = (event: MessageEvent) => {
       try {
-        const startTime = performance.now();
-        const res = await fetch(`${baseUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: content })
-        });
-        const endTime = performance.now();
-        const workedFor = ((endTime - startTime) / 1000).toFixed(1);
+        const data = JSON.parse(event.data);
         
-        const data = await res.json();
-        
+        if (data.type === 'chat') {
+          setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            author: data.data.author === 'blanco' ? 'ling' : data.data.author,
+            content: data.data.content,
+            timestamp: data.data.timestamp,
+            workedFor: data.data.workedFor
+          }]);
+          setIsTyping(false);
+        }
+      } catch (e) {
+        console.error('Invalid message:', e);
+      }
+    };
+
+    // This is a bit hacky - we need to access the WebSocket from context
+    // In a real app, we'd expose the WebSocket instance properly
+    window.addEventListener('websocket-message', handleWebSocketMessage as any);
+    
+    return () => {
+      window.removeEventListener('websocket-message', handleWebSocketMessage as any);
+    };
+  }, []);
+
+  const handleSendMessage = async (content: string) => {
+    if (wsStatus === 'connected') {
+      // Send via WebSocket
+      wsSend({
+        type: 'chat',
+        message: content
+      });
+      setIsTyping(true);
+    } else {
+      // Fallback to HTTP or demo mode
+      const userMessage: Message = {
+        id: Date.now().toString(),
+        author: 'you',
+        content,
+        timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+      };
+      
+      setMessages(prev => [...prev, userMessage]);
+      setIsTyping(true);
+
+      // Demo response
+      setTimeout(() => {
         const agentMessage: Message = {
           id: (Date.now() + 1).toString(),
           author: 'ling',
-          content: data.content,
-          timestamp: data.timestamp,
-          workedFor: data.workedFor || `${workedFor}s`
-        };
-        
-        setMessages(prev => [...prev, agentMessage]);
-      } catch (error) {
-        // Fallback response
-        const agentMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          author: 'ling',
-          content: 'I\'m having trouble connecting to the knowledge graph. Try asking about memories, agents, or status.',
+          content: "I'm currently offline. Start the backend server (`node server.js`) to chat with me in real-time.",
           timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
           workedFor: '0.1s'
         };
         setMessages(prev => [...prev, agentMessage]);
-      }
-    } else {
-      // Demo mode responses
-      setTimeout(() => {
-        let response = '';
-        if (content.toLowerCase().includes('hello') || content.toLowerCase().includes('hi')) {
-          response = 'Hello! I\'m connected to the Knowledge Graph. I can help you search memories, check agent status, or explore the graph.';
-        } else if (content.toLowerCase().includes('search') || content.toLowerCase().includes('find')) {
-          response = 'In demo mode. Start the API server (`node server.js`) to search the real Knowledge Graph.';
-        } else if (content.toLowerCase().includes('agent')) {
-          response = 'Demo mode: 2 agents shown. Start the API to see real active agents from tmux sessions.';
-        } else {
-          response = 'I understand. The Knowledge Graph API is currently offline (demo mode). Start the backend server to enable full functionality.';
-        }
-        
-        const agentMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          author: 'ling',
-          content: response,
-          timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-          workedFor: '0.5s'
-        };
-        setMessages(prev => [...prev, agentMessage]);
         setIsTyping(false);
       }, 500);
-      return;
     }
-    
-    setIsTyping(false);
   };
 
   return (

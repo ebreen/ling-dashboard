@@ -1,23 +1,156 @@
+const WebSocket = require('ws');
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+// Express app
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
-// Knowledge Graph API - connects to qmd
+// WebSocket server
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+// Connected clients
+const clients = new Set();
+
+// Broadcast to all clients
+function broadcast(data) {
+  const message = JSON.stringify(data);
+  clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// WebSocket connection handling
+wss.on('connection', (ws) => {
+  console.log('Client connected');
+  clients.add(ws);
+  
+  // Send initial status
+  ws.send(JSON.stringify({
+    type: 'status',
+    data: { connected: true, timestamp: new Date().toISOString() }
+  }));
+  
+  ws.on('close', () => {
+    console.log('Client disconnected');
+    clients.delete(ws);
+  });
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      handleWebSocketMessage(data, ws);
+    } catch (e) {
+      console.error('Invalid WebSocket message:', e);
+    }
+  });
+});
+
+function handleWebSocketMessage(data, ws) {
+  switch (data.type) {
+    case 'ping':
+      ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+      break;
+    case 'subscribe':
+      // Client subscribing to specific updates
+      ws.subscriptions = data.channels || [];
+      break;
+    case 'chat':
+      // Real-time chat message
+      handleRealtimeChat(data.message, ws);
+      break;
+  }
+}
+
+async function handleRealtimeChat(message, ws) {
+  const startTime = performance.now();
+  
+  // Broadcast user message to all clients
+  broadcast({
+    type: 'chat',
+    data: {
+      author: 'you',
+      content: message,
+      timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+    }
+  });
+  
+  // Process command
+  let response = '';
+  let workedFor = '';
+  
+  if (message.includes('search') || message.includes('find')) {
+    const query = message.replace(/search|find/gi, '').trim();
+    const results = kgAPI.search(query, { limit: 5 });
+    const endTime = performance.now();
+    workedFor = `${((endTime - startTime) / 1000).toFixed(1)}s`;
+    response = `Found ${results.results?.length || 0} memories for "${query}"`;
+  } else if (message.includes('status')) {
+    const agents = kgAPI.getActiveAgents();
+    const endTime = performance.now();
+    workedFor = `${((endTime - startTime) / 1000).toFixed(1)}s`;
+    response = `I'm running ${agents.length} agents:\n${agents.map(a => `• ${a.name}`).join('\n')}`;
+  } else if (message.includes('hello') || message.includes('hi')) {
+    const endTime = performance.now();
+    workedFor = `${((endTime - startTime) / 1000).toFixed(1)}s`;
+    response = "Hey! I'm Blanco. This is my dashboard - you can see my memories, agents, and activity here. What would you like to know?";
+  } else if (message.includes('memory') || message.includes('remember')) {
+    const memories = kgAPI.getRecentMemories(3);
+    const endTime = performance.now();
+    workedFor = `${((endTime - startTime) / 1000).toFixed(1)}s`;
+    response = `My recent memories:\n${memories.map(m => `• ${m.keyPoints[0]}`).join('\n')}`;
+  } else {
+    const endTime = performance.now();
+    workedFor = `${((endTime - startTime) / 1000).toFixed(1)}s`;
+    response = "I can search my memories, show you my active agents, or tell you what I'm working on. Try 'search [query]', 'status', or 'memory'";
+  }
+  
+  // Send response
+  broadcast({
+    type: 'chat',
+    data: {
+      author: 'blanco',
+      content: response,
+      timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+      workedFor
+    }
+  });
+}
+
+// Auto-broadcast updates
+setInterval(() => {
+  const activities = kgAPI.getActivityFeed();
+  const agents = kgAPI.getActiveAgents();
+  
+  broadcast({
+    type: 'update',
+    data: {
+      activities: activities.slice(0, 5),
+      agents: agents.slice(0, 5),
+      timestamp: Date.now()
+    }
+  });
+}, 5000); // Every 5 seconds
+
+// [Rest of the KnowledgeGraphAPI class and routes from previous server.js]
 class KnowledgeGraphAPI {
   constructor() {
     this.collection = 'life';
   }
 
-  search(query, limit = 10) {
+  search(query, options = {}) {
     try {
+      const limit = options.limit || 10;
       const cmd = `qmd search "${query.replace(/"/g, '\\"')}" -c ${this.collection} -n ${limit} --json`;
       const result = execSync(cmd, { encoding: 'utf-8', cwd: process.env.HOME });
       return JSON.parse(result);
@@ -197,7 +330,8 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    knowledgeGraph: kgAPI.listEntities().entities?.length || 0
+    knowledgeGraph: kgAPI.listEntities().entities?.length || 0,
+    websocket: wss.clients.size
   });
 });
 
@@ -228,42 +362,14 @@ app.get('/api/agents', (req, res) => {
   res.json(kgAPI.getActiveAgents());
 });
 
-// Chat endpoint
-app.post('/api/chat', (req, res) => {
-  const { message } = req.body;
-  
-  // Simple command parsing
-  if (message.includes('search') || message.includes('find')) {
-    const query = message.replace(/search|find/gi, '').trim();
-    const results = kgAPI.search(query, { limit: 5 });
-    res.json({
-      author: 'ling',
-      content: `Found ${results.results?.length || 0} memories for "${query}"`,
-      timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-      workedFor: '0.5s'
-    });
-  } else if (message.includes('status') || message.includes('agents')) {
-    const agents = kgAPI.getActiveAgents();
-    res.json({
-      author: 'ling',
-      content: `${agents.length} agents active:\n${agents.map(a => `• ${a.name} (${a.status})`).join('\n')}`,
-      timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-      workedFor: '0.3s'
-    });
-  } else {
-    res.json({
-      author: 'ling',
-      content: 'I can help you search memories, check agent status, or explore the knowledge graph. What would you like to do?',
-      timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-      workedFor: '0.2s'
-    });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`🧠 Ling Dashboard API`);
-  console.log(`====================`);
-  console.log(`Server: http://localhost:${PORT}`);
+// Start server
+server.listen(PORT, () => {
+  console.log(`🧠 Blanco's Dashboard Server`);
+  console.log(`============================`);
+  console.log(`HTTP API: http://localhost:${PORT}`);
+  console.log(`WebSocket: ws://localhost:${PORT}`);
+  console.log(`\nThis is MY dashboard - my memories, my agents, my activity.`);
+  console.log(`Connect via WebSocket for real-time updates.`);
   console.log(`\nEndpoints:`);
   console.log(`  GET  /api/health`);
   console.log(`  GET  /api/memories/search?q=query`);
@@ -272,6 +378,6 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/memories/recent?days=7`);
   console.log(`  GET  /api/activity`);
   console.log(`  GET  /api/agents`);
-  console.log(`  POST /api/chat`);
   console.log(`\nKnowledge Graph: ${kgAPI.listEntities().entities?.length || 0} entities`);
+  console.log(`Connected clients: ${wss.clients.size}`);
 });
