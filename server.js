@@ -5,11 +5,15 @@ const cors = require('cors');
 const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { ClawdbotIPC } = require('./api/ipc');
 
 // Express app
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Initialize IPC for Clawdbot communication
+const ipc = new ClawdbotIPC();
 
 const PORT = process.env.PORT || 3001;
 
@@ -85,7 +89,28 @@ async function handleRealtimeChat(message, ws) {
     }
   });
   
-  // Process command
+  // Try IPC connection to Clawdbot first
+  ipc.sendMessage(message, (response) => {
+    const endTime = performance.now();
+    const workedFor = `${((endTime - startTime) / 1000).toFixed(1)}s`;
+    
+    broadcast({
+      type: 'chat',
+      data: {
+        author: 'blanco',
+        content: response.content || response.error || 'No response',
+        timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+        workedFor
+      }
+    });
+  });
+}
+
+// Fallback local processing (if IPC fails)
+async function handleLocalChat(message, ws) {
+  const startTime = performance.now();
+  
+  // Process command locally
   let response = '';
   let workedFor = '';
   
