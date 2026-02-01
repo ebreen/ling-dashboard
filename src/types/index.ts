@@ -5,6 +5,7 @@ export interface Message {
   timestamp: string;
   spawnBadges?: SpawnBadge[];
   isCode?: boolean;
+  workedFor?: string;
 }
 
 export interface SpawnBadge {

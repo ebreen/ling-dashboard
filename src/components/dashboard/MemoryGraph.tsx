@@ -1,4 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+
+interface MemoryGraphProps {
+  apiUrl?: string;
+}
 
 interface NodeState {
   id: string;
@@ -7,13 +11,59 @@ interface NodeState {
   vx: number;
   vy: number;
   radius: number;
+  label?: string;
 }
 
-const MemoryGraph = () => {
+const MemoryGraph = ({ apiUrl }: MemoryGraphProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const nodesRef = useRef<NodeState[]>([]);
+  const edgesRef = useRef<{source: string, target: string}[]>([]);
   const animationRef = useRef<number>();
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    // Fetch real graph data if API is available
+    if (apiUrl) {
+      fetch(`${apiUrl}/api/memories/graph`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.nodes && data.nodes.length > 0) {
+            nodesRef.current = data.nodes.map((n: any) => ({
+              id: n.id,
+              x: Math.random() * 400 + 50,
+              y: Math.random() * 300 + 50,
+              vx: (Math.random() - 0.5) * 0.4,
+              vy: (Math.random() - 0.5) * 0.4,
+              radius: 3 + Math.random() * 4,
+              label: n.label
+            }));
+            edgesRef.current = data.edges || [];
+          }
+          setIsLoading(false);
+        })
+        .catch(() => {
+          // Use demo nodes on error
+          initializeDemoNodes();
+          setIsLoading(false);
+        });
+    } else {
+      initializeDemoNodes();
+      setIsLoading(false);
+    }
+  }, [apiUrl]);
+
+  const initializeDemoNodes = () => {
+    nodesRef.current = Array.from({ length: 30 }, (_, i) => ({
+      id: `node-${i}`,
+      x: Math.random() * 400 + 50,
+      y: Math.random() * 300 + 50,
+      vx: (Math.random() - 0.5) * 0.4,
+      vy: (Math.random() - 0.5) * 0.4,
+      radius: 2 + Math.random() * 4
+    }));
+    edgesRef.current = [];
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -32,18 +82,6 @@ const MemoryGraph = () => {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    // Initialize nodes if empty
-    if (nodesRef.current.length === 0) {
-      nodesRef.current = Array.from({ length: 30 }, (_, i) => ({
-        id: `node-${i}`,
-        x: Math.random() * canvas.width,
-        y: Math.random() * canvas.height,
-        vx: (Math.random() - 0.5) * 0.4,
-        vy: (Math.random() - 0.5) * 0.4,
-        radius: 2 + Math.random() * 4
-      }));
-    }
-
     const animate = () => {
       if (!ctx || !canvas) return;
       
@@ -51,6 +89,7 @@ const MemoryGraph = () => {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       const nodes = nodesRef.current;
+      const edges = edgesRef.current;
 
       // Update positions
       nodes.forEach(node => {
@@ -68,27 +107,41 @@ const MemoryGraph = () => {
         }
       });
 
-      // Draw connections
-      ctx.strokeStyle = 'rgba(224, 112, 32, 0.15)';
-      ctx.lineWidth = 1;
-
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const dx = nodes[i].x - nodes[j].x;
-          const dy = nodes[i].y - nodes[j].y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-
-          if (dist < 100) {
-            ctx.globalAlpha = 1 - dist / 100;
+      // Draw edges from API data or proximity
+      if (edges.length > 0) {
+        // Draw API edges
+        ctx.strokeStyle = 'rgba(224, 112, 32, 0.2)';
+        ctx.lineWidth = 1;
+        edges.forEach(edge => {
+          const source = nodes.find(n => n.id === edge.source);
+          const target = nodes.find(n => n.id === edge.target);
+          if (source && target) {
             ctx.beginPath();
-            ctx.moveTo(nodes[i].x, nodes[i].y);
-            ctx.lineTo(nodes[j].x, nodes[j].y);
+            ctx.moveTo(source.x, source.y);
+            ctx.lineTo(target.x, target.y);
             ctx.stroke();
           }
+        });
+      } else {
+        // Draw proximity-based edges
+        ctx.strokeStyle = 'rgba(224, 112, 32, 0.15)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const dx = nodes[i].x - nodes[j].x;
+            const dy = nodes[i].y - nodes[j].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 100) {
+              ctx.globalAlpha = 1 - dist / 100;
+              ctx.beginPath();
+              ctx.moveTo(nodes[i].x, nodes[i].y);
+              ctx.lineTo(nodes[j].x, nodes[j].y);
+              ctx.stroke();
+            }
+          }
         }
+        ctx.globalAlpha = 1;
       }
-
-      ctx.globalAlpha = 1;
 
       // Draw nodes
       nodes.forEach(node => {
@@ -123,10 +176,15 @@ const MemoryGraph = () => {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, []);
+  }, [isLoading]);
 
   return (
-    <div ref={containerRef} className="w-full h-full">
+    <div ref={containerRef} className="w-full h-full relative">
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-background-panel">
+          <span className="text-xs text-text-muted animate-pulse">Loading graph...</span>
+        </div>
+      )}
       <canvas ref={canvasRef} className="w-full h-full" />
     </div>
   );

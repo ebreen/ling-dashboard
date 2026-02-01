@@ -23,6 +23,7 @@ export default {
           orange: '#E07020',
           'orange-hover': '#D96C1A',
           green: '#22C55E',
+          gold: '#D4A520',
         },
         border: {
           subtle: '#2A2A2A',

@@ -1,6 +1,10 @@
-import { Brain } from 'lucide-react';
+import { Brain, Circle } from 'lucide-react';
 
-const Header = () => {
+interface HeaderProps {
+  apiStatus?: string;
+}
+
+const Header = ({ apiStatus }: HeaderProps) => {
   return (
     <header className="h-[60px] bg-background-panel border-b border-border-subtle flex items-center justify-between px-6 shrink-0">
       <div className="flex items-center gap-8">
@@ -25,6 +29,15 @@ const Header = () => {
       </div>
       
       <div className="flex items-center gap-4 font-mono text-xs text-text-secondary">
+        {apiStatus && (
+          <>
+            <Circle className={`w-2 h-2 ${apiStatus === 'connected' ? 'text-accent-green fill-accent-green' : 'text-text-muted'}`} />
+            <span className={apiStatus === 'connected' ? 'text-accent-green' : 'text-text-muted'}>
+              {apiStatus === 'connected' ? 'live' : apiStatus}
+            </span>
+            <span>|</span>
+          </>
+        )}
         <span className="text-accent-orange">opus</span>
         <span>|</span>
         <span><span className="text-text-primary">572</span> memories</span>
@@ -35,7 +48,7 @@ const Header = () => {
         <span>|</span>
         <span>next: <span className="text-text-primary">9:00pm</span></span>
         <span>|</span>
-        <span className="text-text-primary">6:54 PM</span>
+        <span className="text-text-primary">{new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
       </div>
     </header>
   );

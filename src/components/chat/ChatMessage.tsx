@@ -1,5 +1,5 @@
 import { Message } from '../../types';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, Clock } from 'lucide-react';
 
 interface ChatMessageProps {
   message: Message;
@@ -25,7 +25,7 @@ const ChatMessage = ({ message }: ChatMessageProps) => {
   };
 
   return (
-    <div className="flex gap-4 animate-fadeIn">
+    <div className="flex gap-4 animate-fadeIn group">
       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-semibold shrink-0 ${
         isAgent 
           ? 'bg-accent-orange text-white' 
@@ -41,15 +41,23 @@ const ChatMessage = ({ message }: ChatMessageProps) => {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-3 mb-1">
           <span className={`text-sm font-semibold ${
-            isAgent ? 'text-accent-orange' : 'text-text-primary'
+            isAgent ? 'text-accent-orange' : 'text-accent-gold'
           }`}>
             {message.author}
           </span>
           <span className="text-xs text-text-muted">{message.timestamp}</span>
+          
+          {message.workedFor && (
+            <span className="flex items-center gap-1 text-[10px] text-text-muted opacity-0 group-hover:opacity-100 transition-opacity">
+              <Clock className="w-3 h-3" />
+              worked for {message.workedFor}
+            </span>
+          )}
         </div>
-        
         <div 
-          className="text-sm text-text-secondary leading-relaxed"
+          className={`text-sm leading-relaxed ${
+            isAgent ? 'text-text-secondary' : 'text-accent-gold/90'
+          }`}
           dangerouslySetInnerHTML={{ __html: formatContent(message.content) }}
         />
         
