@@ -1,91 +1,86 @@
-import { useState, useEffect, createContext, useContext, useRef } from 'react';
+import { useState, useEffect, createContext, useContext } from 'react';
 import Header from './components/layout/Header';
 import ChatPanel from './components/chat/ChatPanel';
 import DashboardPanel from './components/dashboard/DashboardPanel';
+import { MessageProvider, useMessages } from './context/MessageContext';
 
+// API context for Vortex Mission Control requests
 interface APIContextType {
   baseUrl: string;
-  apiStatus: string;
-  wsStatus: string;
-  wsSend: (data: any) => void;
+  wsUrl: string;
+  apiStatus: 'checking' | 'connected' | 'offline';
 }
 
-const APIContext = createContext<APIContextType>({ 
-  baseUrl: 'http://localhost:3001', 
+const APIContext = createContext<APIContextType>({
+  baseUrl: 'http://localhost:8787',
+  wsUrl: 'ws://localhost:8787/ws',
   apiStatus: 'checking',
-  wsStatus: 'disconnected',
-  wsSend: () => {}
 });
 
 export const useAPI = () => useContext(APIContext);
 
-function App() {
-  const [apiStatus, setApiStatus] = useState('checking');
-  const [wsStatus, setWsStatus] = useState('disconnected');
-  const wsRef = useRef<WebSocket | null>(null);
-  const baseUrl = 'http://localhost:3001';
-  const wsUrl = 'ws://localhost:3001';
+// Inner app component that uses MessageProvider
+function AppContent() {
+  const [activeTab, setActiveTab] = useState('CHAT');
+  const { connectionStatus } = useMessages();
 
+  return (
+    <div className="h-screen w-screen flex flex-col overflow-hidden bg-background-dark">
+      <Header wsStatus={connectionStatus} />
+      <main className="flex-1 flex overflow-hidden">
+        <ChatPanel activeTab={activeTab} onTabChange={setActiveTab} />
+        <div className="hidden md:block">
+          <DashboardPanel />
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function App() {
+  const [apiStatus, setApiStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
+
+  // Existing chat backend (legacy ling-dashboard stack)
+  const chatBaseUrl =
+    window.location.hostname === 'localhost'
+      ? 'http://localhost:3001'
+      : `http://${window.location.host}`;
+
+  const chatWsUrl =
+    window.location.hostname === 'localhost'
+      ? 'ws://localhost:3001'
+      : `ws://${window.location.host}`;
+
+  // New Vortex backend
+  const vortexBaseUrl =
+    window.location.hostname === 'localhost'
+      ? 'http://localhost:8787'
+      : `http://${window.location.hostname}:8787`;
+
+  const vortexWsUrl =
+    window.location.hostname === 'localhost'
+      ? 'ws://localhost:8787/ws'
+      : `ws://${window.location.hostname}:8787/ws`;
+
+  // Check Vortex API health on mount
   useEffect(() => {
-    // Check HTTP API
-    fetch(`${baseUrl}/api/health`)
-      .then(res => res.json())
-      .then(data => {
-        console.log('API Connected:', data);
+    fetch(`${vortexBaseUrl}/health`)
+      .then((res) => res.json())
+      .then((data) => {
+        console.log('Vortex API Connected:', data);
         setApiStatus('connected');
       })
       .catch(() => {
-        console.log('API not available, using demo mode');
+        console.log('Vortex API not available, dashboard demo mode');
         setApiStatus('offline');
       });
-
-    // Connect WebSocket
-    const connectWebSocket = () => {
-      const ws = new WebSocket(wsUrl);
-      
-      ws.onopen = () => {
-        console.log('WebSocket connected');
-        setWsStatus('connected');
-        ws.send(JSON.stringify({ type: 'subscribe', channels: ['chat', 'updates'] }));
-      };
-      
-      ws.onclose = () => {
-        console.log('WebSocket disconnected');
-        setWsStatus('disconnected');
-        // Reconnect after 3 seconds
-        setTimeout(connectWebSocket, 3000);
-      };
-      
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setWsStatus('error');
-      };
-      
-      wsRef.current = ws;
-    };
-
-    connectWebSocket();
-
-    return () => {
-      wsRef.current?.close();
-    };
-  }, []);
-
-  const wsSend = (data: any) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
-    }
-  };
+  }, [vortexBaseUrl]);
 
   return (
-    <APIContext.Provider value={{ baseUrl, apiStatus, wsStatus, wsSend }}>
-      <div className="h-screen w-screen flex flex-col overflow-hidden bg-background-dark">
-        <Header wsStatus={wsStatus} />
-        <main className="flex-1 flex overflow-hidden">
-          <ChatPanel />
-          <DashboardPanel />
-        </main>
-      </div>
+    <APIContext.Provider value={{ baseUrl: vortexBaseUrl, wsUrl: vortexWsUrl, apiStatus }}>
+      <MessageProvider baseUrl={chatBaseUrl} wsUrl={chatWsUrl}>
+        <AppContent />
+      </MessageProvider>
     </APIContext.Provider>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAPI } from '../../App';
 import ActivityFeed from './ActivityFeed';
 import MemoryGraph from './MemoryGraph';
@@ -7,61 +7,128 @@ import RecentMemories from './RecentMemories';
 import { Activity, Agent, Memory } from '../../types';
 import { demoActivities, demoAgents, demoMemories } from '../../data/demoData';
 
+interface MissionOverview {
+  summary?: {
+    tasks?: {
+      inbox?: number;
+      assigned?: number;
+      inProgress?: number;
+      review?: number;
+      done?: number;
+      blocked?: number;
+    };
+    realtimeTeams?: number;
+    asyncAgents?: number;
+    subAgentsRunning?: number;
+    tokenSpendToday?: number;
+  };
+  timeline?: Array<{
+    id: number | string;
+    type: string;
+    message: string;
+    createdAt?: string;
+    metadata?: Record<string, unknown>;
+  }>;
+}
+
 const DashboardPanel = () => {
-  const { baseUrl, apiStatus } = useAPI();
+  const { baseUrl, wsUrl, apiStatus } = useAPI();
   const [activities, setActivities] = useState<Activity[]>(demoActivities);
   const [agents, setAgents] = useState<Agent[]>(demoAgents);
   const [memories, setMemories] = useState<Memory[]>(demoMemories);
-  const [stats, setStats] = useState({ entities: 0, loading: true });
+  const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
 
-  useEffect(() => {
+  const applyOverview = useCallback((overview: MissionOverview) => {
+    const timeline = overview.timeline || [];
+
+    const nextActivities: Activity[] = timeline.map((item) => ({
+      id: `act-${item.id}`,
+      type: item.type.startsWith('task_') ? 'MAIN' : 'CRON',
+      name: item.message,
+      date: (item.createdAt || new Date().toISOString()).split(' ')[0].split('T')[0],
+    }));
+
+    const nextMemories: Memory[] = timeline.slice(0, 8).map((item) => ({
+      id: `mem-${item.id}`,
+      content: item.message,
+      timestamp: item.createdAt || new Date().toISOString(),
+      relativeTime: 'just now',
+    }));
+
+    const tasks = overview.summary?.tasks || {};
+    const totalTasks =
+      (tasks.inbox || 0) +
+      (tasks.assigned || 0) +
+      (tasks.inProgress || 0) +
+      (tasks.review || 0) +
+      (tasks.done || 0) +
+      (tasks.blocked || 0);
+
+    setActivities(nextActivities.length > 0 ? nextActivities : demoActivities);
+    setMemories(nextMemories.length > 0 ? nextMemories : demoMemories);
+    setStats((prev) => ({
+      ...prev,
+      totalTasks,
+      entities: totalTasks + agents.length,
+      loading: false,
+    }));
+  }, [agents.length]);
+
+  const fetchMissionData = useCallback(async () => {
     if (apiStatus !== 'connected') return;
 
-    // Fetch real data from API
-    fetch(`${baseUrl}/api/activity`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.length > 0) setActivities(data);
-      })
-      .catch(console.error);
+    try {
+      const [overviewRes, agentsRes] = await Promise.all([
+        fetch(`${baseUrl}/mission/overview`),
+        fetch(`${baseUrl}/agents`),
+      ]);
 
-    fetch(`${baseUrl}/api/agents`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.length > 0) setAgents(data);
-      })
-      .catch(console.error);
+      if (overviewRes.ok) {
+        const overview = await overviewRes.json();
+        applyOverview(overview);
+      }
 
-    fetch(`${baseUrl}/api/memories/recent?days=7`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.length > 0) {
-          const formatted = data.map((m: any) => ({
-            id: m.id,
-            content: m.content || m.keyPoints?.[0] || 'Memory',
-            timestamp: m.date,
-            relativeTime: m.relativeTime
-          }));
-          setMemories(formatted);
+      if (agentsRes.ok) {
+        const agentsJson = await agentsRes.json();
+        if (Array.isArray(agentsJson.agents) && agentsJson.agents.length > 0) {
+          setAgents(agentsJson.agents);
         }
-      })
-      .catch(console.error);
+      }
+    } catch (error) {
+      console.error('Mission fetch failed:', error);
+      setStats((prev) => ({ ...prev, loading: false }));
+    }
+  }, [apiStatus, baseUrl, applyOverview]);
 
-    fetch(`${baseUrl}/api/memories/entities`)
-      .then(res => res.json())
-      .then(data => {
-        setStats({ entities: data.entities?.length || 0, loading: false });
-      })
-      .catch(() => setStats({ entities: 0, loading: false }));
+  useEffect(() => {
+    fetchMissionData();
 
-    // Auto-refresh every 30 seconds
-    const interval = setInterval(() => {
-      fetch(`${baseUrl}/api/activity`).then(r => r.json()).then(setActivities).catch(console.error);
-      fetch(`${baseUrl}/api/agents`).then(r => r.json()).then(setAgents).catch(console.error);
-    }, 30000);
+    if (apiStatus !== 'connected') return;
 
-    return () => clearInterval(interval);
-  }, [apiStatus, baseUrl]);
+    const interval = setInterval(fetchMissionData, 30000);
+
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'mission_overview' && payload.payload) {
+            applyOverview(payload.payload as MissionOverview);
+          }
+        } catch {
+          // ignore malformed packets
+        }
+      };
+    } catch {
+      // websocket optional
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+    };
+  }, [apiStatus, wsUrl, fetchMissionData, applyOverview]);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-background-panel">
@@ -73,7 +140,7 @@ const DashboardPanel = () => {
           </span>
           <span>|</span>
           <span>
-            <span className="text-text-primary">{activities.length}</span> activities
+            <span className="text-text-primary">{stats.totalTasks}</span> tasks
           </span>
           <span>|</span>
           <span>
@@ -81,7 +148,7 @@ const DashboardPanel = () => {
           </span>
         </div>
         <div className="text-[10px] text-text-muted">
-          {apiStatus === 'connected' ? '🟢 Live data' : '⚪ Demo mode'}
+          {apiStatus === 'connected' ? '🟢 Vortex live' : '⚪ Demo mode'}
         </div>
       </div>
 
@@ -94,10 +161,15 @@ const DashboardPanel = () => {
             <span className="text-[10px] text-text-muted">{activities.length} items</span>
           </div>
           <div className="flex-1 overflow-y-auto scrollbar-thin">
-            <ActivityFeed activities={activities} />
+            <ActivityFeed
+              activities={activities}
+              onSessionClick={(sessionId) => {
+                window.dispatchEvent(new CustomEvent('load-session', { detail: sessionId }));
+              }}
+            />
           </div>
         </div>
-        
+
         {/* Right column: Memory Graph + Agents */}
         <div className="flex-1 flex flex-col">
           {/* Memory Graph */}
@@ -110,7 +182,7 @@ const DashboardPanel = () => {
               <MemoryGraph apiUrl={baseUrl} />
             </div>
           </div>
-          
+
           {/* Agents Table */}
           <div className="h-[180px] shrink-0">
             <div className="px-5 py-3 border-b border-border-subtle flex items-center justify-between">
@@ -121,7 +193,7 @@ const DashboardPanel = () => {
           </div>
         </div>
       </div>
-      
+
       {/* Bottom row: Recent Memories */}
       <div className="h-[200px] border-t border-border-subtle shrink-0">
         <div className="px-5 py-3 border-b border-border-subtle flex items-center justify-between">
