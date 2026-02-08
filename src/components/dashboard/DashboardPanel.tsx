@@ -8,6 +8,8 @@ import TaskBoard from './TaskBoard';
 import { Activity, Agent, Memory, TaskBoardColumns, TaskBoardTask, TaskBoardStatus } from '../../types';
 import { demoActivities, demoAgents, demoMemories } from '../../data/demoData';
 
+type MissionControlWsStatus = 'connected' | 'reconnecting' | 'disconnected';
+
 interface MissionOverview {
   summary?: {
     tasks?: {
@@ -129,6 +131,8 @@ const DashboardPanel = () => {
   const [taskBoard, setTaskBoard] = useState<TaskBoardColumns>(EMPTY_TASK_COLUMNS);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeSummary>(EMPTY_AGENT_RUNTIME);
   const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
+  const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
+  const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
 
   const applyOverview = useCallback((overview: MissionOverview) => {
     const timeline = overview.timeline || [];
@@ -217,46 +221,97 @@ const DashboardPanel = () => {
   useEffect(() => {
     fetchMissionData();
 
-    if (apiStatus !== 'connected') return;
+    if (apiStatus !== 'connected') {
+      setMissionControlWsStatus('disconnected');
+      return;
+    }
 
     const interval = setInterval(fetchMissionData, 30000);
 
     let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(wsUrl);
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type === 'mission_overview' && payload.payload) {
-            applyOverview(payload.payload as MissionOverview);
-          }
-          if (payload.type === 'tasks_board' && payload.payload) {
-            setTaskBoard(normalizeTaskBoardPayload(payload.payload as TaskBoardApiPayload));
-          }
-          if (payload.type === 'agents_summary' && payload.payload) {
-            const incoming = payload.payload as Record<string, unknown>;
+    let reconnectTimer: number | null = null;
+    let shouldReconnect = true;
 
-            if ((incoming as MissionAgentsSummaryResponse).summary?.runtime) {
-              applyAgentRuntimeSummary(incoming as MissionAgentsSummaryResponse);
-            } else if (incoming.runtime || incoming.realtime || incoming.async) {
-              applyAgentRuntimeSummary({
-                summary: {
-                  runtime: (incoming.runtime || incoming) as MissionRuntime,
-                },
-              });
+    const scheduleReconnect = () => {
+      if (!shouldReconnect) return;
+      setMissionControlWsStatus('reconnecting');
+      reconnectTimer = window.setTimeout(connectWebSocket, 2500);
+    };
+
+    const connectWebSocket = () => {
+      if (!shouldReconnect) return;
+
+      setMissionControlWsStatus((prev) => (prev === 'connected' ? 'connected' : 'reconnecting'));
+
+      try {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          setMissionControlWsStatus('connected');
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            let hasRealtimeUpdate = false;
+
+            if (payload.type === 'mission_overview' && payload.payload) {
+              applyOverview(payload.payload as MissionOverview);
+              hasRealtimeUpdate = true;
             }
+            if (payload.type === 'tasks_board' && payload.payload) {
+              setTaskBoard(normalizeTaskBoardPayload(payload.payload as TaskBoardApiPayload));
+              hasRealtimeUpdate = true;
+            }
+            if (payload.type === 'agents_summary' && payload.payload) {
+              const incoming = payload.payload as Record<string, unknown>;
+
+              if ((incoming as MissionAgentsSummaryResponse).summary?.runtime) {
+                applyAgentRuntimeSummary(incoming as MissionAgentsSummaryResponse);
+                hasRealtimeUpdate = true;
+              } else if (incoming.runtime || incoming.realtime || incoming.async) {
+                applyAgentRuntimeSummary({
+                  summary: {
+                    runtime: (incoming.runtime || incoming) as MissionRuntime,
+                  },
+                });
+                hasRealtimeUpdate = true;
+              }
+            }
+
+            if (hasRealtimeUpdate) {
+              setLastRealtimeUpdateAt(new Date().toISOString());
+            }
+          } catch {
+            // ignore malformed packets
           }
-        } catch {
-          // ignore malformed packets
-        }
-      };
-    } catch {
-      // websocket optional
-    }
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+
+        ws.onclose = () => {
+          if (!shouldReconnect) {
+            setMissionControlWsStatus('disconnected');
+            return;
+          }
+
+          scheduleReconnect();
+        };
+      } catch {
+        scheduleReconnect();
+      }
+    };
+
+    connectWebSocket();
 
     return () => {
+      shouldReconnect = false;
       clearInterval(interval);
-      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
+      setMissionControlWsStatus('disconnected');
     };
   }, [apiStatus, wsUrl, fetchMissionData, applyOverview, applyAgentRuntimeSummary]);
 
@@ -273,6 +328,16 @@ const DashboardPanel = () => {
   }, [agents, apiStatus, agentRuntime.realtime.total, agentRuntime.async.total]);
 
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
+
+  const wsStatusColorClass = missionControlWsStatus === 'connected'
+    ? 'text-accent-orange'
+    : missionControlWsStatus === 'reconnecting'
+      ? 'text-yellow-400'
+      : 'text-text-muted';
+
+  const lastRealtimeUpdateLabel = lastRealtimeUpdateAt
+    ? new Date(lastRealtimeUpdateAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '—';
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-background-panel">
@@ -299,8 +364,12 @@ const DashboardPanel = () => {
             ASYNC <span className="text-text-primary">{agentRuntime.async.running}</span>/<span className="text-text-primary">{agentRuntime.async.idle}</span> run/idle
           </span>
         </div>
-        <div className="text-[10px] text-text-muted">
-          {apiStatus === 'connected' ? '🟢 Vortex live' : '⚪ Demo mode'}
+        <div className="flex items-center gap-4 text-[10px] text-text-muted">
+          <span className="whitespace-nowrap">
+            <span className={wsStatusColorClass}>●</span> MC {missionControlWsStatus}
+          </span>
+          <span className="whitespace-nowrap">Last RT update {lastRealtimeUpdateLabel}</span>
+          <span className="whitespace-nowrap">{apiStatus === 'connected' ? '🟢 Vortex live' : '⚪ Demo mode'}</span>
         </div>
       </div>
 
