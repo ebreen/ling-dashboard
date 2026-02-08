@@ -252,9 +252,13 @@ const DashboardPanel = () => {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [handoffTargetAgentId, setHandoffTargetAgentId] = useState('');
   const [handoffMessage, setHandoffMessage] = useState('');
+  const [teamEditName, setTeamEditName] = useState('');
+  const [teamEditDescription, setTeamEditDescription] = useState('');
+  const [teamEditStatus, setTeamEditStatus] = useState('active');
+  const [detachAgentId, setDetachAgentId] = useState('');
   const [pendingHandoffs, setPendingHandoffs] = useState<TeamHandoffItem[]>([]);
   const [claimedHandoffs, setClaimedHandoffs] = useState<TeamHandoffItem[]>([]);
-  const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | 'claim' | 'complete' | null>(null);
+  const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | 'claim' | 'complete' | 'update' | 'detach' | 'archive' | null>(null);
   const [teamControlNotice, setTeamControlNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
   const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
@@ -530,8 +534,25 @@ const DashboardPanel = () => {
     if (!selectedAgentId && agents.length > 0) {
       setSelectedAgentId(agents[0].id);
       setHandoffTargetAgentId(agents[0].id);
+      setDetachAgentId(agents[0].id);
     }
   }, [agents, selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedTeamId) {
+      setTeamEditName('');
+      setTeamEditDescription('');
+      setTeamEditStatus('active');
+      return;
+    }
+
+    const selectedTeam = teamRuntimeTeams.find((team) => team.id === selectedTeamId);
+    if (!selectedTeam) return;
+
+    setTeamEditName(selectedTeam.name || '');
+    setTeamEditDescription('');
+    setTeamEditStatus(selectedTeam.status || 'active');
+  }, [selectedTeamId, teamRuntimeTeams]);
 
   useEffect(() => {
     if (!selectedTeamId) return;
@@ -738,6 +759,127 @@ const DashboardPanel = () => {
     }
   }, [apiStatus, baseUrl, fetchMissionData, selectedAgentId, selectedTeamId]);
 
+  const updateTeamConfig = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    const nextName = teamEditName.trim();
+    const nextStatus = teamEditStatus.trim();
+    const nextDescription = teamEditDescription.trim();
+
+    if (!nextName) {
+      setTeamControlNotice({ type: 'error', text: 'Team name is required' });
+      return;
+    }
+
+    setTeamControlBusy('update');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: nextName,
+          description: nextDescription || undefined,
+          status: nextStatus || undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Update team failed');
+      }
+
+      setTeamControlNotice({ type: 'ok', text: 'Team updated' });
+      await fetchMissionData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Update team failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, selectedTeamId, teamEditDescription, teamEditName, teamEditStatus]);
+
+  const detachAgentFromTeam = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId || !detachAgentId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team and agent' });
+      return;
+    }
+
+    setTeamControlBusy('detach');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/agents/${encodeURIComponent(detachAgentId)}`, {
+        method: 'DELETE',
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Detach agent failed');
+      }
+
+      setTeamControlNotice({ type: 'ok', text: 'Agent detached' });
+      await fetchMissionData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Detach agent failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, detachAgentId, fetchMissionData, selectedTeamId]);
+
+  const archiveSelectedTeam = useCallback(async () => {
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    setTeamControlBusy('archive');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/archive`, {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Archive team failed');
+      }
+
+      setTeamControlNotice({ type: 'ok', text: 'Team archived' });
+      await fetchMissionData();
+      setPendingHandoffs([]);
+      setClaimedHandoffs([]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Archive team failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, selectedTeamId]);
+
   const enqueueTeamHandoff = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (apiStatus !== 'connected') {
@@ -864,6 +1006,7 @@ const DashboardPanel = () => {
     }
   }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
 
+  const selectedTeam = teamRuntimeTeams.find((team) => team.id === selectedTeamId);
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
 
   const wsStatusColorClass = missionControlWsStatus === 'connected'
@@ -995,6 +1138,71 @@ const DashboardPanel = () => {
               enqueue
             </button>
           </form>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-mono text-text-secondary">
+          <form className="flex items-center gap-1" onSubmit={updateTeamConfig}>
+            <span className="text-text-muted">Maint</span>
+            <input
+              value={teamEditName}
+              onChange={(event) => setTeamEditName(event.target.value)}
+              placeholder="team name"
+              className="w-28 rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            />
+            <input
+              value={teamEditDescription}
+              onChange={(event) => setTeamEditDescription(event.target.value)}
+              placeholder="description"
+              className="w-36 rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            />
+            <select
+              value={teamEditStatus}
+              onChange={(event) => setTeamEditStatus(event.target.value)}
+              className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            >
+              <option value="active">active</option>
+              <option value="paused">paused</option>
+              <option value="draining">draining</option>
+              <option value="archived">archived</option>
+            </select>
+            <button
+              type="submit"
+              disabled={teamControlBusy !== null || !selectedTeamId}
+              className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              update
+            </button>
+          </form>
+
+          <form className="flex items-center gap-1" onSubmit={detachAgentFromTeam}>
+            <select
+              value={detachAgentId}
+              onChange={(event) => setDetachAgentId(event.target.value)}
+              className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            >
+              <option value="">detach agent…</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.name}</option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              disabled={teamControlBusy !== null || !selectedTeamId || !detachAgentId}
+              className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              detach
+            </button>
+          </form>
+
+          <button
+            type="button"
+            onClick={archiveSelectedTeam}
+            disabled={teamControlBusy !== null || !selectedTeamId || selectedTeam?.status === 'archived'}
+            className="rounded border border-red-500/40 px-2 py-1 text-red-300 hover:border-red-400 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Archive selected team (backend may reject when guardrails trigger)"
+          >
+            archive team
+          </button>
 
           <span className={teamControlNotice?.type === 'error' ? 'text-red-400' : 'text-accent-orange'}>
             {teamControlNotice ? teamControlNotice.text : 'Team controls ready'}
