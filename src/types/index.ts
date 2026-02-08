@@ -58,6 +58,9 @@ export interface TaskBoardTask {
   id: string;
   title: string;
   assigneeName: string;
+  assigneeId?: string | null;
+  status?: string;
+  companyId?: string;
 }
 
 export type TaskBoardColumns = Record<TaskBoardStatus, TaskBoardTask[]>;

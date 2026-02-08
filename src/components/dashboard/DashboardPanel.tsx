@@ -58,8 +58,11 @@ type MissionRuntime = NonNullable<NonNullable<MissionAgentsSummaryResponse['summ
 
 type RawTask = {
   id?: string | number;
+  companyId?: string;
   title?: string;
   name?: string;
+  status?: string;
+  assigneeId?: string | null;
   assignee?: string | { name?: string; username?: string };
   assigneeName?: string;
 };
@@ -84,6 +87,16 @@ const EMPTY_AGENT_RUNTIME: AgentRuntimeSummary = {
 };
 
 const TASK_STATUSES: TaskBoardStatus[] = ['inbox', 'assigned', 'inProgress', 'review', 'done', 'blocked'];
+const API_STATUS_BY_BOARD: Record<TaskBoardStatus, string> = {
+  inbox: 'inbox',
+  assigned: 'assigned',
+  inProgress: 'in_progress',
+  review: 'review',
+  done: 'done',
+  blocked: 'blocked',
+};
+const TASK_STATUS_FLOW: TaskBoardStatus[] = ['inbox', 'assigned', 'inProgress', 'review', 'done'];
+const DEFAULT_COMPANY_ID = 'kirie-ai';
 
 const getAssigneeName = (task: RawTask, index: number) => {
   if (task.assigneeName) return task.assigneeName;
@@ -105,6 +118,9 @@ const normalizeTaskBoardPayload = (payload: TaskBoardApiPayload): TaskBoardColum
       id: String(task.id ?? `${status}-${index}`),
       title: task.title || task.name || 'Untitled task',
       assigneeName: getAssigneeName(task, index),
+      assigneeId: task.assigneeId ?? null,
+      status: task.status,
+      companyId: task.companyId,
     }));
   });
 
@@ -123,6 +139,45 @@ const toRuntimeBucket = (bucket?: Partial<AgentRuntimeBucket>): AgentRuntimeBuck
   total: bucket?.total || 0,
 });
 
+const findTaskColumn = (columns: TaskBoardColumns, taskId: string): TaskBoardStatus | null => {
+  for (const status of TASK_STATUSES) {
+    if (columns[status].some((task) => task.id === taskId)) return status;
+  }
+  return null;
+};
+
+const moveTaskInColumns = (
+  columns: TaskBoardColumns,
+  taskId: string,
+  targetStatus: TaskBoardStatus,
+  mutate?: (task: TaskBoardTask) => TaskBoardTask,
+): TaskBoardColumns => {
+  const next: TaskBoardColumns = {
+    inbox: [...columns.inbox],
+    assigned: [...columns.assigned],
+    inProgress: [...columns.inProgress],
+    review: [...columns.review],
+    done: [...columns.done],
+    blocked: [...columns.blocked],
+  };
+
+  let movedTask: TaskBoardTask | null = null;
+  for (const status of TASK_STATUSES) {
+    const idx = next[status].findIndex((task) => task.id === taskId);
+    if (idx >= 0) {
+      movedTask = next[status][idx];
+      next[status].splice(idx, 1);
+      break;
+    }
+  }
+
+  if (!movedTask) return columns;
+
+  const finalTask = mutate ? mutate(movedTask) : movedTask;
+  next[targetStatus] = [finalTask, ...next[targetStatus]];
+  return next;
+};
+
 const DashboardPanel = () => {
   const { baseUrl, wsUrl, apiStatus } = useAPI();
   const [activities, setActivities] = useState<Activity[]>(demoActivities);
@@ -133,6 +188,8 @@ const DashboardPanel = () => {
   const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
   const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
+  const [creatingTask, setCreatingTask] = useState(false);
+  const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(new Set());
 
   const applyOverview = useCallback((overview: MissionOverview) => {
     const timeline = overview.timeline || [];
@@ -327,6 +384,127 @@ const DashboardPanel = () => {
     }));
   }, [agents, apiStatus, agentRuntime.realtime.total, agentRuntime.async.total]);
 
+  const createTask = useCallback(async (title: string) => {
+    if (apiStatus !== 'connected') throw new Error('Vortex API offline');
+
+    setCreatingTask(true);
+    try {
+      const res = await fetch(`${baseUrl}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId: DEFAULT_COMPANY_ID, title }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Create task failed');
+      }
+
+      const payload = await res.json();
+      const createdTask = payload.task as RawTask;
+      setTaskBoard((prev) => ({
+        ...prev,
+        inbox: [{
+          id: String(createdTask.id),
+          title: createdTask.title || title,
+          assigneeName: getAssigneeName(createdTask, 0),
+          assigneeId: createdTask.assigneeId ?? null,
+          status: createdTask.status,
+          companyId: createdTask.companyId || DEFAULT_COMPANY_ID,
+        }, ...prev.inbox],
+      }));
+      await fetchMissionData();
+    } finally {
+      setCreatingTask(false);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData]);
+
+  const assignTask = useCallback(async (task: TaskBoardTask, agentId: string) => {
+    if (apiStatus !== 'connected') throw new Error('Vortex API offline');
+
+    const agent = agents.find((item) => item.id === agentId);
+    setPendingTaskIds((prev) => new Set(prev).add(task.id));
+
+    const previousBoard = taskBoard;
+    setTaskBoard((prev) =>
+      moveTaskInColumns(prev, task.id, 'assigned', (item) => ({
+        ...item,
+        assigneeId: agentId,
+        assigneeName: agent?.name || item.assigneeName,
+        status: 'assigned',
+      }))
+    );
+
+    try {
+      const res = await fetch(`${baseUrl}/tasks/${task.id}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Assign failed');
+      }
+
+      await fetchMissionData();
+    } catch (error) {
+      setTaskBoard(previousBoard);
+      throw error;
+    } finally {
+      setPendingTaskIds((prev) => {
+        const next = new Set(prev);
+        next.delete(task.id);
+        return next;
+      });
+    }
+  }, [apiStatus, agents, baseUrl, fetchMissionData, taskBoard]);
+
+  const moveTask = useCallback(async (task: TaskBoardTask, direction: 'backward' | 'forward') => {
+    if (apiStatus !== 'connected') throw new Error('Vortex API offline');
+
+    const from = findTaskColumn(taskBoard, task.id);
+    if (!from) return;
+
+    const flowIdx = TASK_STATUS_FLOW.indexOf(from);
+    if (flowIdx < 0) return;
+
+    const targetIdx = direction === 'forward' ? flowIdx + 1 : flowIdx - 1;
+    if (targetIdx < 0 || targetIdx >= TASK_STATUS_FLOW.length) return;
+
+    const targetStatus = TASK_STATUS_FLOW[targetIdx];
+    const apiStatusValue = API_STATUS_BY_BOARD[targetStatus];
+
+    setPendingTaskIds((prev) => new Set(prev).add(task.id));
+
+    const previousBoard = taskBoard;
+    setTaskBoard((prev) => moveTaskInColumns(prev, task.id, targetStatus, (item) => ({ ...item, status: apiStatusValue })));
+
+    try {
+      const res = await fetch(`${baseUrl}/tasks/${task.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: apiStatusValue, agentId: task.assigneeId ?? null }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Status update failed');
+      }
+
+      await fetchMissionData();
+    } catch (error) {
+      setTaskBoard(previousBoard);
+      throw error;
+    } finally {
+      setPendingTaskIds((prev) => {
+        const next = new Set(prev);
+        next.delete(task.id);
+        return next;
+      });
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, taskBoard]);
+
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
 
   const wsStatusColorClass = missionControlWsStatus === 'connected'
@@ -424,7 +602,15 @@ const DashboardPanel = () => {
           <span className="text-[10px] text-text-muted">/mission/tasks-board</span>
         </div>
         <div className="h-[calc(100%-44px)]">
-          <TaskBoard columns={taskBoard} />
+          <TaskBoard
+            columns={taskBoard}
+            agents={agents}
+            onCreateTask={createTask}
+            onAssignTask={assignTask}
+            onMoveTask={moveTask}
+            pendingTaskIds={pendingTaskIds}
+            creatingTask={creatingTask}
+          />
         </div>
       </div>
 
