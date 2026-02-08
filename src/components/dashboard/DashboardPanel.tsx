@@ -52,6 +52,8 @@ interface AgentRuntimeSummary {
   async: AgentRuntimeBucket;
 }
 
+type MissionRuntime = NonNullable<NonNullable<MissionAgentsSummaryResponse['summary']>['runtime']>;
+
 type RawTask = {
   id?: string | number;
   title?: string;
@@ -113,6 +115,12 @@ const isAgentRunning = (agent: Agent & { runState?: string; status?: string }) =
   return status === 'run' || status === 'running' || status === 'active' || runState === 'running' || runState === 'run';
 };
 
+const toRuntimeBucket = (bucket?: Partial<AgentRuntimeBucket>): AgentRuntimeBucket => ({
+  running: bucket?.running || 0,
+  idle: bucket?.idle || 0,
+  total: bucket?.total || 0,
+});
+
 const DashboardPanel = () => {
   const { baseUrl, wsUrl, apiStatus } = useAPI();
   const [activities, setActivities] = useState<Activity[]>(demoActivities);
@@ -158,6 +166,16 @@ const DashboardPanel = () => {
     }));
   }, [agents.length]);
 
+  const applyAgentRuntimeSummary = useCallback((summaryPayload: MissionAgentsSummaryResponse) => {
+    const runtime = summaryPayload.summary?.runtime;
+    if (!runtime) return;
+
+    setAgentRuntime({
+      realtime: toRuntimeBucket(runtime.realtime),
+      async: toRuntimeBucket(runtime.async),
+    });
+  }, []);
+
   const fetchMissionData = useCallback(async () => {
     if (apiStatus !== 'connected') return;
 
@@ -188,27 +206,13 @@ const DashboardPanel = () => {
 
       if (agentsSummaryRes.ok) {
         const summaryPayload = (await agentsSummaryRes.json()) as MissionAgentsSummaryResponse;
-        const runtime = summaryPayload.summary?.runtime;
-        if (runtime) {
-          setAgentRuntime({
-            realtime: {
-              running: runtime.realtime?.running || 0,
-              idle: runtime.realtime?.idle || 0,
-              total: runtime.realtime?.total || 0,
-            },
-            async: {
-              running: runtime.async?.running || 0,
-              idle: runtime.async?.idle || 0,
-              total: runtime.async?.total || 0,
-            },
-          });
-        }
+        applyAgentRuntimeSummary(summaryPayload);
       }
     } catch (error) {
       console.error('Mission fetch failed:', error);
       setStats((prev) => ({ ...prev, loading: false }));
     }
-  }, [apiStatus, baseUrl, applyOverview]);
+  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary]);
 
   useEffect(() => {
     fetchMissionData();
@@ -229,6 +233,19 @@ const DashboardPanel = () => {
           if (payload.type === 'tasks_board' && payload.payload) {
             setTaskBoard(normalizeTaskBoardPayload(payload.payload as TaskBoardApiPayload));
           }
+          if (payload.type === 'agents_summary' && payload.payload) {
+            const incoming = payload.payload as Record<string, unknown>;
+
+            if ((incoming as MissionAgentsSummaryResponse).summary?.runtime) {
+              applyAgentRuntimeSummary(incoming as MissionAgentsSummaryResponse);
+            } else if (incoming.runtime || incoming.realtime || incoming.async) {
+              applyAgentRuntimeSummary({
+                summary: {
+                  runtime: (incoming.runtime || incoming) as MissionRuntime,
+                },
+              });
+            }
+          }
         } catch {
           // ignore malformed packets
         }
@@ -241,7 +258,7 @@ const DashboardPanel = () => {
       clearInterval(interval);
       if (ws && ws.readyState === WebSocket.OPEN) ws.close();
     };
-  }, [apiStatus, wsUrl, fetchMissionData, applyOverview]);
+  }, [apiStatus, wsUrl, fetchMissionData, applyOverview, applyAgentRuntimeSummary]);
 
   useEffect(() => {
     if (apiStatus === 'connected' && (agentRuntime.realtime.total > 0 || agentRuntime.async.total > 0)) return;
