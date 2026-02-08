@@ -83,6 +83,19 @@ interface TeamRuntimeRecent {
   updatedAt: string;
 }
 
+interface TeamHandoffItem {
+  id: string;
+  type?: string;
+  fromAgentId?: string | null;
+  toAgentId?: string | null;
+  payload?: { text?: string };
+  deliveryState?: string;
+}
+
+interface TeamHandoffsResponse {
+  handoffs?: TeamHandoffItem[];
+}
+
 interface TeamRuntimeResponse {
   summary?: Partial<TeamRuntimeSummary>;
   teams?: TeamRuntimeTeam[];
@@ -239,7 +252,9 @@ const DashboardPanel = () => {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [handoffTargetAgentId, setHandoffTargetAgentId] = useState('');
   const [handoffMessage, setHandoffMessage] = useState('');
-  const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | null>(null);
+  const [pendingHandoffs, setPendingHandoffs] = useState<TeamHandoffItem[]>([]);
+  const [claimedHandoffs, setClaimedHandoffs] = useState<TeamHandoffItem[]>([]);
+  const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | 'claim' | 'complete' | null>(null);
   const [teamControlNotice, setTeamControlNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
   const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
@@ -307,6 +322,36 @@ const DashboardPanel = () => {
     setTeamRuntimeTeams(Array.isArray(payload.teams) ? payload.teams : []);
   }, []);
 
+  const fetchTeamHandoffs = useCallback(async (teamId: string, agentId?: string) => {
+    if (apiStatus !== 'connected' || !teamId) {
+      setPendingHandoffs([]);
+      setClaimedHandoffs([]);
+      return;
+    }
+
+    try {
+      const claimedAgentId = agentId || handoffTargetAgentId || selectedAgentId;
+      const claimedQuery = claimedAgentId ? `&agentId=${encodeURIComponent(claimedAgentId)}` : '';
+
+      const [pendingRes, claimedRes] = await Promise.all([
+        fetch(`${baseUrl}/teams/${encodeURIComponent(teamId)}/handoffs/pending?limit=5`),
+        fetch(`${baseUrl}/teams/${encodeURIComponent(teamId)}/handoffs/claimed?limit=5${claimedQuery}`),
+      ]);
+
+      if (pendingRes.ok) {
+        const payload = (await pendingRes.json()) as TeamHandoffsResponse;
+        setPendingHandoffs(Array.isArray(payload.handoffs) ? payload.handoffs : []);
+      }
+
+      if (claimedRes.ok) {
+        const payload = (await claimedRes.json()) as TeamHandoffsResponse;
+        setClaimedHandoffs(Array.isArray(payload.handoffs) ? payload.handoffs : []);
+      }
+    } catch {
+      // Keep existing handoff list when network hiccups occur.
+    }
+  }, [apiStatus, baseUrl, handoffTargetAgentId, selectedAgentId]);
+
   const fetchMissionData = useCallback(async () => {
     if (apiStatus !== 'connected') return;
 
@@ -345,11 +390,15 @@ const DashboardPanel = () => {
         const teamRuntimePayload = (await teamRuntimeRes.json()) as TeamRuntimeResponse;
         applyTeamRuntime(teamRuntimePayload);
       }
+
+      if (selectedTeamId) {
+        await fetchTeamHandoffs(selectedTeamId);
+      }
     } catch (error) {
       console.error('Mission fetch failed:', error);
       setStats((prev) => ({ ...prev, loading: false }));
     }
-  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary, applyTeamRuntime]);
+  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary, applyTeamRuntime, fetchTeamHandoffs, selectedTeamId]);
 
   useEffect(() => {
     fetchMissionData();
@@ -471,11 +520,23 @@ const DashboardPanel = () => {
   }, [teamRuntimeTeams, selectedTeamId]);
 
   useEffect(() => {
+    if (!selectedTeamId) {
+      setPendingHandoffs([]);
+      setClaimedHandoffs([]);
+    }
+  }, [selectedTeamId]);
+
+  useEffect(() => {
     if (!selectedAgentId && agents.length > 0) {
       setSelectedAgentId(agents[0].id);
       setHandoffTargetAgentId(agents[0].id);
     }
   }, [agents, selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedTeamId) return;
+    fetchTeamHandoffs(selectedTeamId);
+  }, [fetchTeamHandoffs, selectedTeamId, selectedAgentId, handoffTargetAgentId]);
 
   const createTask = useCallback(async (title: string) => {
     if (apiStatus !== 'connected') throw new Error('Vortex API offline');
@@ -720,13 +781,88 @@ const DashboardPanel = () => {
       setHandoffMessage('');
       setTeamControlNotice({ type: 'ok', text: 'Handoff queued' });
       await fetchMissionData();
+      await fetchTeamHandoffs(selectedTeamId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Enqueue handoff failed';
       setTeamControlNotice({ type: 'error', text: message });
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, handoffMessage, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffMessage, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+
+  const claimPendingHandoff = useCallback(async (handoffId: string) => {
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    setTeamControlBusy('claim');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/handoffs/${encodeURIComponent(handoffId)}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ claimedByAgentId: selectedAgentId || handoffTargetAgentId || 'operator' }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Claim handoff failed');
+      }
+
+      setTeamControlNotice({ type: 'ok', text: 'Handoff claimed' });
+      await fetchMissionData();
+      await fetchTeamHandoffs(selectedTeamId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Claim handoff failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+
+  const completeClaimedHandoff = useCallback(async (handoffId: string) => {
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    setTeamControlBusy('complete');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/handoffs/${encodeURIComponent(handoffId)}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completedByAgentId: selectedAgentId || handoffTargetAgentId || 'operator' }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Complete handoff failed');
+      }
+
+      setTeamControlNotice({ type: 'ok', text: 'Handoff completed' });
+      await fetchMissionData();
+      await fetchTeamHandoffs(selectedTeamId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Complete handoff failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
 
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
 
@@ -863,6 +999,52 @@ const DashboardPanel = () => {
           <span className={teamControlNotice?.type === 'error' ? 'text-red-400' : 'text-accent-orange'}>
             {teamControlNotice ? teamControlNotice.text : 'Team controls ready'}
           </span>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-start gap-4 text-[10px] text-text-secondary">
+          <div className="flex items-center gap-2">
+            <span className="text-text-muted">Pending</span>
+            {pendingHandoffs.length === 0 ? (
+              <span className="text-text-muted">—</span>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {pendingHandoffs.slice(0, 3).map((handoff) => (
+                  <button
+                    key={handoff.id}
+                    type="button"
+                    disabled={teamControlBusy !== null}
+                    onClick={() => claimPendingHandoff(handoff.id)}
+                    className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+                    title={handoff.payload?.text || handoff.type || handoff.id}
+                  >
+                    claim {handoff.id.slice(0, 6)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-text-muted">Claimed</span>
+            {claimedHandoffs.length === 0 ? (
+              <span className="text-text-muted">—</span>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {claimedHandoffs.slice(0, 3).map((handoff) => (
+                  <button
+                    key={handoff.id}
+                    type="button"
+                    disabled={teamControlBusy !== null}
+                    onClick={() => completeClaimedHandoff(handoff.id)}
+                    className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+                    title={handoff.payload?.text || handoff.type || handoff.id}
+                  >
+                    complete {handoff.id.slice(0, 6)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
