@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, FormEvent } from 'react';
 import { useAPI } from '../../App';
 import ActivityFeed from './ActivityFeed';
 import MemoryGraph from './MemoryGraph';
@@ -141,6 +141,7 @@ const API_STATUS_BY_BOARD: Record<TaskBoardStatus, string> = {
 };
 const TASK_STATUS_FLOW: TaskBoardStatus[] = ['inbox', 'assigned', 'inProgress', 'review', 'done'];
 const DEFAULT_COMPANY_ID = 'kirie-ai';
+const DEFAULT_HANDOFF_TYPE = 'handoff.message';
 
 const getAssigneeName = (task: RawTask, index: number) => {
   if (task.assigneeName) return task.assigneeName;
@@ -231,7 +232,15 @@ const DashboardPanel = () => {
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeSummary>(EMPTY_AGENT_RUNTIME);
   const [teamRuntimeSummary, setTeamRuntimeSummary] = useState<TeamRuntimeSummary>(EMPTY_TEAM_RUNTIME_SUMMARY);
   const [teamRuntimeRecent, setTeamRuntimeRecent] = useState<TeamRuntimeRecent[]>([]);
+  const [teamRuntimeTeams, setTeamRuntimeTeams] = useState<TeamRuntimeTeam[]>([]);
   const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
+  const [teamNameInput, setTeamNameInput] = useState('');
+  const [selectedTeamId, setSelectedTeamId] = useState('');
+  const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [handoffTargetAgentId, setHandoffTargetAgentId] = useState('');
+  const [handoffMessage, setHandoffMessage] = useState('');
+  const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | null>(null);
+  const [teamControlNotice, setTeamControlNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
   const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
@@ -295,6 +304,7 @@ const DashboardPanel = () => {
 
     const recent = Array.isArray(payload.recent) ? payload.recent.slice(0, 6) : [];
     setTeamRuntimeRecent(recent);
+    setTeamRuntimeTeams(Array.isArray(payload.teams) ? payload.teams : []);
   }, []);
 
   const fetchMissionData = useCallback(async () => {
@@ -454,6 +464,19 @@ const DashboardPanel = () => {
     }));
   }, [agents, apiStatus, agentRuntime.realtime.total, agentRuntime.async.total]);
 
+  useEffect(() => {
+    if (!selectedTeamId && teamRuntimeTeams.length > 0) {
+      setSelectedTeamId(teamRuntimeTeams[0].id);
+    }
+  }, [teamRuntimeTeams, selectedTeamId]);
+
+  useEffect(() => {
+    if (!selectedAgentId && agents.length > 0) {
+      setSelectedAgentId(agents[0].id);
+      setHandoffTargetAgentId(agents[0].id);
+    }
+  }, [agents, selectedAgentId]);
+
   const createTask = useCallback(async (title: string) => {
     if (apiStatus !== 'connected') throw new Error('Vortex API offline');
 
@@ -575,6 +598,136 @@ const DashboardPanel = () => {
     }
   }, [apiStatus, baseUrl, fetchMissionData, taskBoard]);
 
+  const createTeam = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    const name = teamNameInput.trim();
+    if (!name) {
+      setTeamControlNotice({ type: 'error', text: 'Team name is required' });
+      return;
+    }
+
+    setTeamControlBusy('create');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Create team failed');
+      }
+
+      const payload = await res.json();
+      const createdTeamId = String(payload.team?.id || payload.id || '');
+      if (createdTeamId) setSelectedTeamId(createdTeamId);
+      setTeamNameInput('');
+      setTeamControlNotice({ type: 'ok', text: 'Team created' });
+      await fetchMissionData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Create team failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, teamNameInput]);
+
+  const attachAgentToTeam = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId || !selectedAgentId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team and agent' });
+      return;
+    }
+
+    setTeamControlBusy('attach');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/agents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: selectedAgentId }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Attach agent failed');
+      }
+
+      setTeamControlNotice({ type: 'ok', text: 'Agent attached' });
+      await fetchMissionData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Attach agent failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, selectedAgentId, selectedTeamId]);
+
+  const enqueueTeamHandoff = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (apiStatus !== 'connected') {
+      setTeamControlNotice({ type: 'error', text: 'Vortex API offline' });
+      return;
+    }
+
+    if (!selectedTeamId) {
+      setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    const fromAgentId = selectedAgentId || 'operator';
+    const toAgentId = handoffTargetAgentId || undefined;
+    const text = handoffMessage.trim();
+    if (!text) {
+      setTeamControlNotice({ type: 'error', text: 'Handoff message is required' });
+      return;
+    }
+
+    setTeamControlBusy('handoff');
+    setTeamControlNotice(null);
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/handoff`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fromAgentId,
+          toAgentId,
+          type: DEFAULT_HANDOFF_TYPE,
+          payload: { text },
+        }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || 'Enqueue handoff failed');
+      }
+
+      setHandoffMessage('');
+      setTeamControlNotice({ type: 'ok', text: 'Handoff queued' });
+      await fetchMissionData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Enqueue handoff failed';
+      setTeamControlNotice({ type: 'error', text: message });
+    } finally {
+      setTeamControlBusy(null);
+    }
+  }, [apiStatus, baseUrl, fetchMissionData, handoffMessage, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
 
   const wsStatusColorClass = missionControlWsStatus === 'connected'
@@ -629,6 +782,87 @@ const DashboardPanel = () => {
             Recent handoffs {teamRuntimeRecent.slice(0, 3).map((item) => item.state[0].toUpperCase()).join('·') || '—'}
           </span>
           <span className="whitespace-nowrap">{apiStatus === 'connected' ? '🟢 Vortex live' : '⚪ Demo mode'}</span>
+        </div>
+      </div>
+
+      <div className="px-5 py-2 border-b border-border-subtle bg-background-panel/80">
+        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-text-secondary">
+          <form className="flex items-center gap-1" onSubmit={createTeam}>
+            <span className="text-text-muted">Team</span>
+            <input
+              value={teamNameInput}
+              onChange={(event) => setTeamNameInput(event.target.value)}
+              placeholder="new-team"
+              className="w-28 rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={teamControlBusy !== null}
+              className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              + create
+            </button>
+          </form>
+
+          <form className="flex items-center gap-1" onSubmit={attachAgentToTeam}>
+            <select
+              value={selectedTeamId}
+              onChange={(event) => setSelectedTeamId(event.target.value)}
+              className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            >
+              <option value="">team…</option>
+              {teamRuntimeTeams.map((team) => (
+                <option key={team.id} value={team.id}>{team.name}</option>
+              ))}
+            </select>
+            <select
+              value={selectedAgentId}
+              onChange={(event) => setSelectedAgentId(event.target.value)}
+              className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            >
+              <option value="">agent…</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.name}</option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              disabled={teamControlBusy !== null}
+              className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              attach
+            </button>
+          </form>
+
+          <form className="flex items-center gap-1" onSubmit={enqueueTeamHandoff}>
+            <select
+              value={handoffTargetAgentId}
+              onChange={(event) => setHandoffTargetAgentId(event.target.value)}
+              className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            >
+              <option value="">target…</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.name}</option>
+              ))}
+            </select>
+            <input
+              value={handoffMessage}
+              onChange={(event) => setHandoffMessage(event.target.value)}
+              placeholder="handoff message"
+              className="w-44 rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={teamControlBusy !== null}
+              className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              enqueue
+            </button>
+          </form>
+
+          <span className={teamControlNotice?.type === 'error' ? 'text-red-400' : 'text-accent-orange'}>
+            {teamControlNotice ? teamControlNotice.text : 'Team controls ready'}
+          </span>
         </div>
       </div>
 
