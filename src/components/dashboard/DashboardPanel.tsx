@@ -32,6 +32,26 @@ interface MissionOverview {
   }>;
 }
 
+interface AgentRuntimeBucket {
+  running: number;
+  idle: number;
+  total: number;
+}
+
+interface MissionAgentsSummaryResponse {
+  summary?: {
+    runtime?: {
+      realtime?: Partial<AgentRuntimeBucket>;
+      async?: Partial<AgentRuntimeBucket>;
+    };
+  };
+}
+
+interface AgentRuntimeSummary {
+  realtime: AgentRuntimeBucket;
+  async: AgentRuntimeBucket;
+}
+
 type RawTask = {
   id?: string | number;
   title?: string;
@@ -42,6 +62,7 @@ type RawTask = {
 
 type TaskBoardApiPayload = Partial<Record<TaskBoardStatus, RawTask[]>> & {
   columns?: Partial<Record<TaskBoardStatus, RawTask[]>>;
+  board?: Partial<Record<TaskBoardStatus, RawTask[]>>;
 };
 
 const EMPTY_TASK_COLUMNS: TaskBoardColumns = {
@@ -51,6 +72,11 @@ const EMPTY_TASK_COLUMNS: TaskBoardColumns = {
   review: [],
   done: [],
   blocked: [],
+};
+
+const EMPTY_AGENT_RUNTIME: AgentRuntimeSummary = {
+  realtime: { running: 0, idle: 0, total: 0 },
+  async: { running: 0, idle: 0, total: 0 },
 };
 
 const TASK_STATUSES: TaskBoardStatus[] = ['inbox', 'assigned', 'inProgress', 'review', 'done', 'blocked'];
@@ -70,7 +96,7 @@ const normalizeTaskBoardPayload = (payload: TaskBoardApiPayload): TaskBoardColum
   const normalized: TaskBoardColumns = { ...EMPTY_TASK_COLUMNS };
 
   TASK_STATUSES.forEach((status) => {
-    const source = payload[status] || payload.columns?.[status] || [];
+    const source = payload[status] || payload.columns?.[status] || payload.board?.[status] || [];
     normalized[status] = source.map((task, index): TaskBoardTask => ({
       id: String(task.id ?? `${status}-${index}`),
       title: task.title || task.name || 'Untitled task',
@@ -81,12 +107,19 @@ const normalizeTaskBoardPayload = (payload: TaskBoardApiPayload): TaskBoardColum
   return normalized;
 };
 
+const isAgentRunning = (agent: Agent & { runState?: string; status?: string }) => {
+  const status = `${agent.status || ''}`.toLowerCase();
+  const runState = `${agent.runState || ''}`.toLowerCase();
+  return status === 'run' || status === 'running' || status === 'active' || runState === 'running' || runState === 'run';
+};
+
 const DashboardPanel = () => {
   const { baseUrl, wsUrl, apiStatus } = useAPI();
   const [activities, setActivities] = useState<Activity[]>(demoActivities);
   const [agents, setAgents] = useState<Agent[]>(demoAgents);
   const [memories, setMemories] = useState<Memory[]>(demoMemories);
   const [taskBoard, setTaskBoard] = useState<TaskBoardColumns>(EMPTY_TASK_COLUMNS);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeSummary>(EMPTY_AGENT_RUNTIME);
   const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
 
   const applyOverview = useCallback((overview: MissionOverview) => {
@@ -129,10 +162,11 @@ const DashboardPanel = () => {
     if (apiStatus !== 'connected') return;
 
     try {
-      const [overviewRes, agentsRes, taskBoardRes] = await Promise.all([
+      const [overviewRes, agentsRes, taskBoardRes, agentsSummaryRes] = await Promise.all([
         fetch(`${baseUrl}/mission/overview`),
         fetch(`${baseUrl}/agents`),
         fetch(`${baseUrl}/mission/tasks-board`),
+        fetch(`${baseUrl}/mission/agents-summary`),
       ]);
 
       if (overviewRes.ok) {
@@ -150,6 +184,25 @@ const DashboardPanel = () => {
       if (taskBoardRes.ok) {
         const boardPayload = await taskBoardRes.json();
         setTaskBoard(normalizeTaskBoardPayload(boardPayload as TaskBoardApiPayload));
+      }
+
+      if (agentsSummaryRes.ok) {
+        const summaryPayload = (await agentsSummaryRes.json()) as MissionAgentsSummaryResponse;
+        const runtime = summaryPayload.summary?.runtime;
+        if (runtime) {
+          setAgentRuntime({
+            realtime: {
+              running: runtime.realtime?.running || 0,
+              idle: runtime.realtime?.idle || 0,
+              total: runtime.realtime?.total || 0,
+            },
+            async: {
+              running: runtime.async?.running || 0,
+              idle: runtime.async?.idle || 0,
+              total: runtime.async?.total || 0,
+            },
+          });
+        }
       }
     } catch (error) {
       console.error('Mission fetch failed:', error);
@@ -190,6 +243,20 @@ const DashboardPanel = () => {
     };
   }, [apiStatus, wsUrl, fetchMissionData, applyOverview]);
 
+  useEffect(() => {
+    if (apiStatus === 'connected' && (agentRuntime.realtime.total > 0 || agentRuntime.async.total > 0)) return;
+
+    const runningCount = agents.filter((agent) => isAgentRunning(agent)).length;
+    const idleCount = Math.max(agents.length - runningCount, 0);
+
+    setAgentRuntime((prev) => ({
+      realtime: prev.realtime.total > 0 ? prev.realtime : { running: 0, idle: 0, total: 0 },
+      async: prev.async.total > 0 ? prev.async : { running: runningCount, idle: idleCount, total: agents.length },
+    }));
+  }, [agents, apiStatus, agentRuntime.realtime.total, agentRuntime.async.total]);
+
+  const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-background-panel">
       {/* Top Stats Bar */}
@@ -205,6 +272,14 @@ const DashboardPanel = () => {
           <span>|</span>
           <span>
             <span className="text-text-primary">{agents.length}</span> agents
+          </span>
+          <span>|</span>
+          <span>
+            RT <span className="text-text-primary">{agentRuntime.realtime.running}</span>/<span className="text-text-primary">{agentRuntime.realtime.idle}</span> run/idle
+          </span>
+          <span>|</span>
+          <span>
+            ASYNC <span className="text-text-primary">{agentRuntime.async.running}</span>/<span className="text-text-primary">{agentRuntime.async.idle}</span> run/idle
           </span>
         </div>
         <div className="text-[10px] text-text-muted">
@@ -247,7 +322,9 @@ const DashboardPanel = () => {
           <div className="h-[180px] shrink-0">
             <div className="px-5 py-3 border-b border-border-subtle flex items-center justify-between">
               <h2 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Active Agents</h2>
-              <span className="text-[10px] text-text-muted">{agents.filter(a => a.status === 'run').length} running</span>
+              <span className="text-[10px] text-text-muted">
+                {runningAgentsTotal} running • RT {agentRuntime.realtime.running}/{agentRuntime.realtime.idle} • AS {agentRuntime.async.running}/{agentRuntime.async.idle}
+              </span>
             </div>
             <AgentsTable agents={agents} />
           </div>
