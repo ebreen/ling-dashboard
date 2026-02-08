@@ -4,7 +4,8 @@ import ActivityFeed from './ActivityFeed';
 import MemoryGraph from './MemoryGraph';
 import AgentsTable from './AgentsTable';
 import RecentMemories from './RecentMemories';
-import { Activity, Agent, Memory } from '../../types';
+import TaskBoard from './TaskBoard';
+import { Activity, Agent, Memory, TaskBoardColumns, TaskBoardTask, TaskBoardStatus } from '../../types';
 import { demoActivities, demoAgents, demoMemories } from '../../data/demoData';
 
 interface MissionOverview {
@@ -31,11 +32,61 @@ interface MissionOverview {
   }>;
 }
 
+type RawTask = {
+  id?: string | number;
+  title?: string;
+  name?: string;
+  assignee?: string | { name?: string; username?: string };
+  assigneeName?: string;
+};
+
+type TaskBoardApiPayload = Partial<Record<TaskBoardStatus, RawTask[]>> & {
+  columns?: Partial<Record<TaskBoardStatus, RawTask[]>>;
+};
+
+const EMPTY_TASK_COLUMNS: TaskBoardColumns = {
+  inbox: [],
+  assigned: [],
+  inProgress: [],
+  review: [],
+  done: [],
+  blocked: [],
+};
+
+const TASK_STATUSES: TaskBoardStatus[] = ['inbox', 'assigned', 'inProgress', 'review', 'done', 'blocked'];
+
+const getAssigneeName = (task: RawTask, index: number) => {
+  if (task.assigneeName) return task.assigneeName;
+  if (typeof task.assignee === 'string' && task.assignee.trim()) return task.assignee;
+  if (typeof task.assignee === 'object' && task.assignee) {
+    if (task.assignee.name) return task.assignee.name;
+    if (task.assignee.username) return task.assignee.username;
+  }
+
+  return `unassigned-${index + 1}`;
+};
+
+const normalizeTaskBoardPayload = (payload: TaskBoardApiPayload): TaskBoardColumns => {
+  const normalized: TaskBoardColumns = { ...EMPTY_TASK_COLUMNS };
+
+  TASK_STATUSES.forEach((status) => {
+    const source = payload[status] || payload.columns?.[status] || [];
+    normalized[status] = source.map((task, index): TaskBoardTask => ({
+      id: String(task.id ?? `${status}-${index}`),
+      title: task.title || task.name || 'Untitled task',
+      assigneeName: getAssigneeName(task, index),
+    }));
+  });
+
+  return normalized;
+};
+
 const DashboardPanel = () => {
   const { baseUrl, wsUrl, apiStatus } = useAPI();
   const [activities, setActivities] = useState<Activity[]>(demoActivities);
   const [agents, setAgents] = useState<Agent[]>(demoAgents);
   const [memories, setMemories] = useState<Memory[]>(demoMemories);
+  const [taskBoard, setTaskBoard] = useState<TaskBoardColumns>(EMPTY_TASK_COLUMNS);
   const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
 
   const applyOverview = useCallback((overview: MissionOverview) => {
@@ -78,9 +129,10 @@ const DashboardPanel = () => {
     if (apiStatus !== 'connected') return;
 
     try {
-      const [overviewRes, agentsRes] = await Promise.all([
+      const [overviewRes, agentsRes, taskBoardRes] = await Promise.all([
         fetch(`${baseUrl}/mission/overview`),
         fetch(`${baseUrl}/agents`),
+        fetch(`${baseUrl}/mission/tasks-board`),
       ]);
 
       if (overviewRes.ok) {
@@ -93,6 +145,11 @@ const DashboardPanel = () => {
         if (Array.isArray(agentsJson.agents) && agentsJson.agents.length > 0) {
           setAgents(agentsJson.agents);
         }
+      }
+
+      if (taskBoardRes.ok) {
+        const boardPayload = await taskBoardRes.json();
+        setTaskBoard(normalizeTaskBoardPayload(boardPayload as TaskBoardApiPayload));
       }
     } catch (error) {
       console.error('Mission fetch failed:', error);
@@ -115,6 +172,9 @@ const DashboardPanel = () => {
           const payload = JSON.parse(event.data);
           if (payload.type === 'mission_overview' && payload.payload) {
             applyOverview(payload.payload as MissionOverview);
+          }
+          if (payload.type === 'tasks_board' && payload.payload) {
+            setTaskBoard(normalizeTaskBoardPayload(payload.payload as TaskBoardApiPayload));
           }
         } catch {
           // ignore malformed packets
@@ -191,6 +251,17 @@ const DashboardPanel = () => {
             </div>
             <AgentsTable agents={agents} />
           </div>
+        </div>
+      </div>
+
+      {/* Task board row */}
+      <div className="h-[250px] border-t border-border-subtle shrink-0">
+        <div className="px-5 py-3 border-b border-border-subtle flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Task Board</h2>
+          <span className="text-[10px] text-text-muted">/mission/tasks-board</span>
+        </div>
+        <div className="h-[calc(100%-44px)]">
+          <TaskBoard columns={taskBoard} />
         </div>
       </div>
 

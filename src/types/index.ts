@@ -1,11 +1,13 @@
 export interface Message {
   id: string;
-  author: 'you' | 'ling';
+  author: 'you' | 'blanco';
   content: string;
   timestamp: string;
   spawnBadges?: SpawnBadge[];
   isCode?: boolean;
   workedFor?: string;
+  sessionId?: string;
+  isoTimestamp?: string;
 }
 
 export interface SpawnBadge {
@@ -49,3 +51,16 @@ export interface GraphEdge {
   source: string;
   target: string;
 }
+
+export type TaskBoardStatus = 'inbox' | 'assigned' | 'inProgress' | 'review' | 'done' | 'blocked';
+
+export interface TaskBoardTask {
+  id: string;
+  title: string;
+  assigneeName: string;
+}
+
+export type TaskBoardColumns = Record<TaskBoardStatus, TaskBoardTask[]>;
+
+// Re-export from MessageContext for convenience
+export type { EnhancedMessage, Conversation, MessageStatus } from '../context/MessageContext';
