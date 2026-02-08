@@ -54,6 +54,41 @@ interface AgentRuntimeSummary {
   async: AgentRuntimeBucket;
 }
 
+interface TeamRuntimeSummary {
+  teamCount: number;
+  activeTeams: number;
+  pending: number;
+  claimed: number;
+  completed: number;
+  total: number;
+}
+
+interface TeamRuntimeTeam {
+  id: string;
+  name: string;
+  status: string;
+  agentCount: number;
+  handoffs: {
+    pending: number;
+    claimed: number;
+    completed: number;
+    total: number;
+  };
+}
+
+interface TeamRuntimeRecent {
+  id: string;
+  teamName: string;
+  state: string;
+  updatedAt: string;
+}
+
+interface TeamRuntimeResponse {
+  summary?: Partial<TeamRuntimeSummary>;
+  teams?: TeamRuntimeTeam[];
+  recent?: TeamRuntimeRecent[];
+}
+
 type MissionRuntime = NonNullable<NonNullable<MissionAgentsSummaryResponse['summary']>['runtime']>;
 
 type RawTask = {
@@ -84,6 +119,15 @@ const EMPTY_TASK_COLUMNS: TaskBoardColumns = {
 const EMPTY_AGENT_RUNTIME: AgentRuntimeSummary = {
   realtime: { running: 0, idle: 0, total: 0 },
   async: { running: 0, idle: 0, total: 0 },
+};
+
+const EMPTY_TEAM_RUNTIME_SUMMARY: TeamRuntimeSummary = {
+  teamCount: 0,
+  activeTeams: 0,
+  pending: 0,
+  claimed: 0,
+  completed: 0,
+  total: 0,
 };
 
 const TASK_STATUSES: TaskBoardStatus[] = ['inbox', 'assigned', 'inProgress', 'review', 'done', 'blocked'];
@@ -185,6 +229,8 @@ const DashboardPanel = () => {
   const [memories, setMemories] = useState<Memory[]>(demoMemories);
   const [taskBoard, setTaskBoard] = useState<TaskBoardColumns>(EMPTY_TASK_COLUMNS);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeSummary>(EMPTY_AGENT_RUNTIME);
+  const [teamRuntimeSummary, setTeamRuntimeSummary] = useState<TeamRuntimeSummary>(EMPTY_TEAM_RUNTIME_SUMMARY);
+  const [teamRuntimeRecent, setTeamRuntimeRecent] = useState<TeamRuntimeRecent[]>([]);
   const [stats, setStats] = useState({ entities: 0, loading: true, totalTasks: 0 });
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
   const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
@@ -237,15 +283,30 @@ const DashboardPanel = () => {
     });
   }, []);
 
+  const applyTeamRuntime = useCallback((payload: TeamRuntimeResponse) => {
+    setTeamRuntimeSummary({
+      teamCount: payload.summary?.teamCount ?? 0,
+      activeTeams: payload.summary?.activeTeams ?? 0,
+      pending: payload.summary?.pending ?? 0,
+      claimed: payload.summary?.claimed ?? 0,
+      completed: payload.summary?.completed ?? 0,
+      total: payload.summary?.total ?? 0,
+    });
+
+    const recent = Array.isArray(payload.recent) ? payload.recent.slice(0, 6) : [];
+    setTeamRuntimeRecent(recent);
+  }, []);
+
   const fetchMissionData = useCallback(async () => {
     if (apiStatus !== 'connected') return;
 
     try {
-      const [overviewRes, agentsRes, taskBoardRes, agentsSummaryRes] = await Promise.all([
+      const [overviewRes, agentsRes, taskBoardRes, agentsSummaryRes, teamRuntimeRes] = await Promise.all([
         fetch(`${baseUrl}/mission/overview`),
         fetch(`${baseUrl}/agents`),
         fetch(`${baseUrl}/mission/tasks-board`),
         fetch(`${baseUrl}/mission/agents-summary`),
+        fetch(`${baseUrl}/mission/team-runtime`),
       ]);
 
       if (overviewRes.ok) {
@@ -269,11 +330,16 @@ const DashboardPanel = () => {
         const summaryPayload = (await agentsSummaryRes.json()) as MissionAgentsSummaryResponse;
         applyAgentRuntimeSummary(summaryPayload);
       }
+
+      if (teamRuntimeRes.ok) {
+        const teamRuntimePayload = (await teamRuntimeRes.json()) as TeamRuntimeResponse;
+        applyTeamRuntime(teamRuntimePayload);
+      }
     } catch (error) {
       console.error('Mission fetch failed:', error);
       setStats((prev) => ({ ...prev, loading: false }));
     }
-  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary]);
+  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary, applyTeamRuntime]);
 
   useEffect(() => {
     fetchMissionData();
@@ -335,6 +401,10 @@ const DashboardPanel = () => {
                 hasRealtimeUpdate = true;
               }
             }
+            if (payload.type === 'team_runtime' && payload.payload) {
+              applyTeamRuntime(payload.payload as TeamRuntimeResponse);
+              hasRealtimeUpdate = true;
+            }
 
             if (hasRealtimeUpdate) {
               setLastRealtimeUpdateAt(new Date().toISOString());
@@ -370,7 +440,7 @@ const DashboardPanel = () => {
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
       setMissionControlWsStatus('disconnected');
     };
-  }, [apiStatus, wsUrl, fetchMissionData, applyOverview, applyAgentRuntimeSummary]);
+  }, [apiStatus, wsUrl, fetchMissionData, applyOverview, applyAgentRuntimeSummary, applyTeamRuntime]);
 
   useEffect(() => {
     if (apiStatus === 'connected' && (agentRuntime.realtime.total > 0 || agentRuntime.async.total > 0)) return;
@@ -541,12 +611,23 @@ const DashboardPanel = () => {
           <span>
             ASYNC <span className="text-text-primary">{agentRuntime.async.running}</span>/<span className="text-text-primary">{agentRuntime.async.idle}</span> run/idle
           </span>
+          <span>|</span>
+          <span>
+            Teams <span className="text-text-primary">{teamRuntimeSummary.teamCount}</span> ({teamRuntimeSummary.activeTeams} active)
+          </span>
+          <span>|</span>
+          <span>
+            Handoffs P/C/D <span className="text-text-primary">{teamRuntimeSummary.pending}</span>/<span className="text-text-primary">{teamRuntimeSummary.claimed}</span>/<span className="text-text-primary">{teamRuntimeSummary.completed}</span>
+          </span>
         </div>
         <div className="flex items-center gap-4 text-[10px] text-text-muted">
           <span className="whitespace-nowrap">
             <span className={wsStatusColorClass}>●</span> MC {missionControlWsStatus}
           </span>
           <span className="whitespace-nowrap">Last RT update {lastRealtimeUpdateLabel}</span>
+          <span className="whitespace-nowrap">
+            Recent handoffs {teamRuntimeRecent.slice(0, 3).map((item) => item.state[0].toUpperCase()).join('·') || '—'}
+          </span>
           <span className="whitespace-nowrap">{apiStatus === 'connected' ? '🟢 Vortex live' : '⚪ Demo mode'}</span>
         </div>
       </div>
