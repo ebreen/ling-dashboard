@@ -290,10 +290,15 @@ const DashboardPanel = () => {
   const [teamActionAgentId, setTeamActionAgentId] = useState('');
   const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | 'claim' | 'complete' | 'update' | 'detach' | 'archive' | null>(null);
   const [teamControlNotice, setTeamControlNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+  const [showArchivedTeams, setShowArchivedTeams] = useState(false);
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
   const [lastRealtimeUpdateAt, setLastRealtimeUpdateAt] = useState<string | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
   const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(new Set());
+
+  const selectedTeam = teamRuntimeTeams.find((team) => team.id === selectedTeamId);
+  const selectedTeamStatus = (selectedTeamDetail?.status || selectedTeam?.status || 'unknown').toLowerCase();
+  const selectedTeamIsArchived = selectedTeamStatus === 'archived';
 
   const applyOverview = useCallback((overview: MissionOverview) => {
     const timeline = overview.timeline || [];
@@ -568,7 +573,8 @@ const DashboardPanel = () => {
 
   useEffect(() => {
     if (!selectedTeamId && teamRuntimeTeams.length > 0) {
-      setSelectedTeamId(teamRuntimeTeams[0].id);
+      const nextDefaultTeam = teamRuntimeTeams.find((team) => team.status !== 'archived') || teamRuntimeTeams[0];
+      setSelectedTeamId(nextDefaultTeam.id);
     }
   }, [teamRuntimeTeams, selectedTeamId]);
 
@@ -804,6 +810,11 @@ const DashboardPanel = () => {
       return;
     }
 
+    if (selectedTeamIsArchived) {
+      setTeamControlNotice({ type: 'error', text: 'Archived teams are read-only' });
+      return;
+    }
+
     setTeamControlBusy('attach');
     setTeamControlNotice(null);
 
@@ -827,7 +838,7 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, selectedAgentId, selectedTeamId]);
+  }, [apiStatus, baseUrl, fetchMissionData, selectedAgentId, selectedTeamId, selectedTeamIsArchived]);
 
   const updateTeamConfig = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -838,6 +849,11 @@ const DashboardPanel = () => {
 
     if (!selectedTeamId) {
       setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    if (selectedTeamIsArchived) {
+      setTeamControlNotice({ type: 'error', text: 'Archived teams are read-only' });
       return;
     }
 
@@ -877,7 +893,7 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, selectedTeamId, teamEditDescription, teamEditName, teamEditStatus]);
+  }, [apiStatus, baseUrl, fetchMissionData, selectedTeamId, selectedTeamIsArchived, teamEditDescription, teamEditName, teamEditStatus]);
 
   const detachAgentFromTeam = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -888,6 +904,11 @@ const DashboardPanel = () => {
 
     if (!selectedTeamId || !detachAgentId) {
       setTeamControlNotice({ type: 'error', text: 'Select team and agent' });
+      return;
+    }
+
+    if (selectedTeamIsArchived) {
+      setTeamControlNotice({ type: 'error', text: 'Archived teams are read-only' });
       return;
     }
 
@@ -912,7 +933,7 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, detachAgentId, fetchMissionData, selectedTeamId]);
+  }, [apiStatus, baseUrl, detachAgentId, fetchMissionData, selectedTeamId, selectedTeamIsArchived]);
 
   const archiveSelectedTeam = useCallback(async () => {
     if (apiStatus !== 'connected') {
@@ -962,6 +983,11 @@ const DashboardPanel = () => {
       return;
     }
 
+    if (selectedTeamIsArchived) {
+      setTeamControlNotice({ type: 'error', text: 'Archived teams are read-only' });
+      return;
+    }
+
     const fromAgentId = selectedAgentId || 'operator';
     const toAgentId = handoffTargetAgentId || undefined;
     const text = handoffMessage.trim();
@@ -1000,7 +1026,7 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffMessage, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffMessage, handoffTargetAgentId, selectedAgentId, selectedTeamId, selectedTeamIsArchived]);
 
   const claimPendingHandoff = useCallback(async (handoffId: string) => {
     if (apiStatus !== 'connected') {
@@ -1010,6 +1036,11 @@ const DashboardPanel = () => {
 
     if (!selectedTeamId) {
       setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    if (selectedTeamIsArchived) {
+      setTeamControlNotice({ type: 'error', text: 'Archived teams are read-only' });
       return;
     }
 
@@ -1037,7 +1068,7 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId, teamActionAgentId]);
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId, selectedTeamIsArchived, teamActionAgentId]);
 
   const completeClaimedHandoff = useCallback(async (handoffId: string) => {
     if (apiStatus !== 'connected') {
@@ -1047,6 +1078,11 @@ const DashboardPanel = () => {
 
     if (!selectedTeamId) {
       setTeamControlNotice({ type: 'error', text: 'Select team first' });
+      return;
+    }
+
+    if (selectedTeamIsArchived) {
+      setTeamControlNotice({ type: 'error', text: 'Archived teams are read-only' });
       return;
     }
 
@@ -1074,12 +1110,21 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId, teamActionAgentId]);
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId, selectedTeamIsArchived, teamActionAgentId]);
 
-  const selectedTeam = teamRuntimeTeams.find((team) => team.id === selectedTeamId);
+  const visibleTeamRuntimeTeams = showArchivedTeams
+    ? teamRuntimeTeams
+    : teamRuntimeTeams.filter((team) => team.status !== 'archived');
   const selectedTeamMembers = selectedTeamDetail?.agents || [];
   const selectedTeamDescription = selectedTeamDetail?.metadata?.description || '';
   const selectedTeamHandoffStats = selectedTeamDetail?.handoffStats;
+  const selectedTeamStatusBadgeClass = selectedTeamStatus === 'active'
+    ? 'border-emerald-400/40 text-emerald-300'
+    : selectedTeamStatus === 'paused'
+      ? 'border-amber-400/40 text-amber-300'
+      : selectedTeamStatus === 'archived'
+        ? 'border-slate-500/40 text-slate-300'
+        : 'border-border-subtle text-text-secondary';
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
 
   const wsStatusColorClass = missionControlWsStatus === 'connected'
@@ -1157,15 +1202,27 @@ const DashboardPanel = () => {
           </form>
 
           <form className="flex items-center gap-1" onSubmit={attachAgentToTeam}>
+            <label className="flex items-center gap-1 text-text-muted">
+              <input
+                type="checkbox"
+                checked={showArchivedTeams}
+                onChange={(event) => setShowArchivedTeams(event.target.checked)}
+                className="h-3 w-3"
+              />
+              archived
+            </label>
             <select
               value={selectedTeamId}
               onChange={(event) => setSelectedTeamId(event.target.value)}
               className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
             >
               <option value="">team…</option>
-              {teamRuntimeTeams.map((team) => (
+              {visibleTeamRuntimeTeams.map((team) => (
                 <option key={team.id} value={team.id}>{team.name}</option>
               ))}
+              {!showArchivedTeams && selectedTeam && selectedTeam.status === 'archived' ? (
+                <option value={selectedTeam.id}>{selectedTeam.name} (archived)</option>
+              ) : null}
             </select>
             <select
               value={selectedAgentId}
@@ -1179,7 +1236,7 @@ const DashboardPanel = () => {
             </select>
             <button
               type="submit"
-              disabled={teamControlBusy !== null}
+              disabled={teamControlBusy !== null || selectedTeamIsArchived}
               className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
             >
               attach
@@ -1190,6 +1247,7 @@ const DashboardPanel = () => {
             <select
               value={handoffTargetAgentId}
               onChange={(event) => setHandoffTargetAgentId(event.target.value)}
+              disabled={selectedTeamIsArchived}
               className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
             >
               <option value="">target…</option>
@@ -1200,12 +1258,13 @@ const DashboardPanel = () => {
             <input
               value={handoffMessage}
               onChange={(event) => setHandoffMessage(event.target.value)}
+              disabled={selectedTeamIsArchived}
               placeholder="handoff message"
               className="w-44 rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
             />
             <button
               type="submit"
-              disabled={teamControlBusy !== null}
+              disabled={teamControlBusy !== null || selectedTeamIsArchived}
               className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
             >
               enqueue
@@ -1240,7 +1299,7 @@ const DashboardPanel = () => {
             </select>
             <button
               type="submit"
-              disabled={teamControlBusy !== null || !selectedTeamId}
+              disabled={teamControlBusy !== null || !selectedTeamId || selectedTeamIsArchived}
               className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
             >
               update
@@ -1260,7 +1319,7 @@ const DashboardPanel = () => {
             </select>
             <button
               type="submit"
-              disabled={teamControlBusy !== null || !selectedTeamId || !detachAgentId}
+              disabled={teamControlBusy !== null || !selectedTeamId || !detachAgentId || selectedTeamIsArchived}
               className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
             >
               detach
@@ -1297,6 +1356,9 @@ const DashboardPanel = () => {
 
           <span className="text-text-muted">Team detail</span>
           <span className="text-text-primary">{selectedTeamDetail?.name || selectedTeam?.name || '—'}</span>
+          <span className={`rounded border px-1.5 py-0.5 uppercase tracking-wide ${selectedTeamStatusBadgeClass}`}>
+            {selectedTeamStatus}
+          </span>
           <span className="text-text-muted">members</span>
           <span className="text-text-primary">{selectedTeamMembers.length}</span>
           <span className="text-text-muted">P/C/D/T</span>
@@ -1317,7 +1379,7 @@ const DashboardPanel = () => {
                   <button
                     key={handoff.id}
                     type="button"
-                    disabled={teamControlBusy !== null}
+                    disabled={teamControlBusy !== null || selectedTeamIsArchived}
                     onClick={() => claimPendingHandoff(handoff.id)}
                     className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
                     title={handoff.payload?.text || handoff.type || handoff.id}
@@ -1339,7 +1401,7 @@ const DashboardPanel = () => {
                   <button
                     key={handoff.id}
                     type="button"
-                    disabled={teamControlBusy !== null}
+                    disabled={teamControlBusy !== null || selectedTeamIsArchived}
                     onClick={() => completeClaimedHandoff(handoff.id)}
                     className="rounded border border-border-subtle px-2 py-1 text-text-primary hover:border-accent-orange disabled:cursor-not-allowed disabled:opacity-50"
                     title={handoff.payload?.text || handoff.type || handoff.id}
