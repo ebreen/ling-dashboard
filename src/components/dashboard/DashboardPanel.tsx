@@ -83,6 +83,34 @@ interface TeamRuntimeRecent {
   updatedAt: string;
 }
 
+interface TeamMember {
+  agentId: string;
+  agentName: string;
+  teamRole?: string | null;
+  agentRole?: string | null;
+  agentStatus?: string | null;
+}
+
+interface TeamDetail {
+  id: string;
+  name: string;
+  status: string;
+  metadata?: { description?: string };
+  agents?: TeamMember[];
+  handoffStats?: {
+    pending?: number;
+    claimed?: number;
+    completed?: number;
+    total?: number;
+    lastUpdatedAt?: string | null;
+  };
+}
+
+interface TeamDetailResponse {
+  ok?: boolean;
+  team?: TeamDetail;
+}
+
 interface TeamHandoffItem {
   id: string;
   type?: string;
@@ -258,6 +286,8 @@ const DashboardPanel = () => {
   const [detachAgentId, setDetachAgentId] = useState('');
   const [pendingHandoffs, setPendingHandoffs] = useState<TeamHandoffItem[]>([]);
   const [claimedHandoffs, setClaimedHandoffs] = useState<TeamHandoffItem[]>([]);
+  const [selectedTeamDetail, setSelectedTeamDetail] = useState<TeamDetail | null>(null);
+  const [teamActionAgentId, setTeamActionAgentId] = useState('');
   const [teamControlBusy, setTeamControlBusy] = useState<'create' | 'attach' | 'handoff' | 'claim' | 'complete' | 'update' | 'detach' | 'archive' | null>(null);
   const [teamControlNotice, setTeamControlNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [missionControlWsStatus, setMissionControlWsStatus] = useState<MissionControlWsStatus>('disconnected');
@@ -326,6 +356,22 @@ const DashboardPanel = () => {
     setTeamRuntimeTeams(Array.isArray(payload.teams) ? payload.teams : []);
   }, []);
 
+  const fetchTeamDetail = useCallback(async (teamId: string) => {
+    if (apiStatus !== 'connected' || !teamId) {
+      setSelectedTeamDetail(null);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(teamId)}`);
+      if (!res.ok) return;
+      const payload = (await res.json()) as TeamDetailResponse;
+      if (payload.team) setSelectedTeamDetail(payload.team);
+    } catch {
+      // keep existing team detail when refresh fails
+    }
+  }, [apiStatus, baseUrl]);
+
   const fetchTeamHandoffs = useCallback(async (teamId: string, agentId?: string) => {
     if (apiStatus !== 'connected' || !teamId) {
       setPendingHandoffs([]);
@@ -334,7 +380,7 @@ const DashboardPanel = () => {
     }
 
     try {
-      const claimedAgentId = agentId || handoffTargetAgentId || selectedAgentId;
+      const claimedAgentId = agentId || teamActionAgentId || handoffTargetAgentId || selectedAgentId;
       const claimedQuery = claimedAgentId ? `&agentId=${encodeURIComponent(claimedAgentId)}` : '';
 
       const [pendingRes, claimedRes] = await Promise.all([
@@ -354,7 +400,7 @@ const DashboardPanel = () => {
     } catch {
       // Keep existing handoff list when network hiccups occur.
     }
-  }, [apiStatus, baseUrl, handoffTargetAgentId, selectedAgentId]);
+  }, [apiStatus, baseUrl, handoffTargetAgentId, selectedAgentId, teamActionAgentId]);
 
   const fetchMissionData = useCallback(async () => {
     if (apiStatus !== 'connected') return;
@@ -396,13 +442,16 @@ const DashboardPanel = () => {
       }
 
       if (selectedTeamId) {
-        await fetchTeamHandoffs(selectedTeamId);
+        await Promise.all([
+          fetchTeamDetail(selectedTeamId),
+          fetchTeamHandoffs(selectedTeamId),
+        ]);
       }
     } catch (error) {
       console.error('Mission fetch failed:', error);
       setStats((prev) => ({ ...prev, loading: false }));
     }
-  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary, applyTeamRuntime, fetchTeamHandoffs, selectedTeamId]);
+  }, [apiStatus, baseUrl, applyOverview, applyAgentRuntimeSummary, applyTeamRuntime, fetchTeamDetail, fetchTeamHandoffs, selectedTeamId]);
 
   useEffect(() => {
     fetchMissionData();
@@ -527,6 +576,7 @@ const DashboardPanel = () => {
     if (!selectedTeamId) {
       setPendingHandoffs([]);
       setClaimedHandoffs([]);
+      setSelectedTeamDetail(null);
     }
   }, [selectedTeamId]);
 
@@ -555,9 +605,29 @@ const DashboardPanel = () => {
   }, [selectedTeamId, teamRuntimeTeams]);
 
   useEffect(() => {
+    const memberIds = selectedTeamDetail?.agents?.map((member) => member.agentId) || [];
+    if (memberIds.length === 0) return;
+
+    if (!memberIds.includes(teamActionAgentId)) {
+      setTeamActionAgentId(memberIds[0]);
+    }
+
+    if (!memberIds.includes(detachAgentId)) {
+      setDetachAgentId(memberIds[0]);
+    }
+
+    if (handoffTargetAgentId && !memberIds.includes(handoffTargetAgentId)) {
+      setHandoffTargetAgentId(memberIds[0]);
+    }
+  }, [selectedTeamDetail, teamActionAgentId, detachAgentId, handoffTargetAgentId]);
+
+  useEffect(() => {
     if (!selectedTeamId) return;
-    fetchTeamHandoffs(selectedTeamId);
-  }, [fetchTeamHandoffs, selectedTeamId, selectedAgentId, handoffTargetAgentId]);
+    void Promise.all([
+      fetchTeamDetail(selectedTeamId),
+      fetchTeamHandoffs(selectedTeamId),
+    ]);
+  }, [fetchTeamDetail, fetchTeamHandoffs, selectedTeamId, selectedAgentId, handoffTargetAgentId, teamActionAgentId]);
 
   const createTask = useCallback(async (title: string) => {
     if (apiStatus !== 'connected') throw new Error('Vortex API offline');
@@ -950,7 +1020,7 @@ const DashboardPanel = () => {
       const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/handoffs/${encodeURIComponent(handoffId)}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ claimedByAgentId: selectedAgentId || handoffTargetAgentId || 'operator' }),
+        body: JSON.stringify({ claimedByAgentId: teamActionAgentId || selectedAgentId || handoffTargetAgentId || 'operator' }),
       });
 
       if (!res.ok) {
@@ -967,7 +1037,7 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId, teamActionAgentId]);
 
   const completeClaimedHandoff = useCallback(async (handoffId: string) => {
     if (apiStatus !== 'connected') {
@@ -987,7 +1057,7 @@ const DashboardPanel = () => {
       const res = await fetch(`${baseUrl}/teams/${encodeURIComponent(selectedTeamId)}/handoffs/${encodeURIComponent(handoffId)}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ completedByAgentId: selectedAgentId || handoffTargetAgentId || 'operator' }),
+        body: JSON.stringify({ completedByAgentId: teamActionAgentId || selectedAgentId || handoffTargetAgentId || 'operator' }),
       });
 
       if (!res.ok) {
@@ -1004,9 +1074,12 @@ const DashboardPanel = () => {
     } finally {
       setTeamControlBusy(null);
     }
-  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId]);
+  }, [apiStatus, baseUrl, fetchMissionData, fetchTeamHandoffs, handoffTargetAgentId, selectedAgentId, selectedTeamId, teamActionAgentId]);
 
   const selectedTeam = teamRuntimeTeams.find((team) => team.id === selectedTeamId);
+  const selectedTeamMembers = selectedTeamDetail?.agents || [];
+  const selectedTeamDescription = selectedTeamDetail?.metadata?.description || '';
+  const selectedTeamHandoffStats = selectedTeamDetail?.handoffStats;
   const runningAgentsTotal = agentRuntime.realtime.running + agentRuntime.async.running;
 
   const wsStatusColorClass = missionControlWsStatus === 'connected'
@@ -1120,8 +1193,8 @@ const DashboardPanel = () => {
               className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
             >
               <option value="">target…</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>{agent.name}</option>
+              {selectedTeamMembers.map((member) => (
+                <option key={member.agentId} value={member.agentId}>{member.agentName}</option>
               ))}
             </select>
             <input
@@ -1181,8 +1254,8 @@ const DashboardPanel = () => {
               className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
             >
               <option value="">detach agent…</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>{agent.name}</option>
+              {selectedTeamMembers.map((member) => (
+                <option key={member.agentId} value={member.agentId}>{member.agentName}</option>
               ))}
             </select>
             <button
@@ -1207,6 +1280,30 @@ const DashboardPanel = () => {
           <span className={teamControlNotice?.type === 'error' ? 'text-red-400' : 'text-accent-orange'}>
             {teamControlNotice ? teamControlNotice.text : 'Team controls ready'}
           </span>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-mono text-text-secondary">
+          <span className="text-text-muted">Handoff actor</span>
+          <select
+            value={teamActionAgentId}
+            onChange={(event) => setTeamActionAgentId(event.target.value)}
+            className="rounded border border-border-subtle bg-background-card px-2 py-1 text-text-primary focus:outline-none"
+          >
+            <option value="">operator…</option>
+            {selectedTeamMembers.map((member) => (
+              <option key={member.agentId} value={member.agentId}>{member.agentName}</option>
+            ))}
+          </select>
+
+          <span className="text-text-muted">Team detail</span>
+          <span className="text-text-primary">{selectedTeamDetail?.name || selectedTeam?.name || '—'}</span>
+          <span className="text-text-muted">members</span>
+          <span className="text-text-primary">{selectedTeamMembers.length}</span>
+          <span className="text-text-muted">P/C/D/T</span>
+          <span className="text-text-primary">
+            {(selectedTeamHandoffStats?.pending ?? 0)}/{(selectedTeamHandoffStats?.claimed ?? 0)}/{(selectedTeamHandoffStats?.completed ?? 0)}/{(selectedTeamHandoffStats?.total ?? 0)}
+          </span>
+          {selectedTeamDescription ? <span className="text-text-muted">— {selectedTeamDescription}</span> : null}
         </div>
 
         <div className="mt-2 flex flex-wrap items-start gap-4 text-[10px] text-text-secondary">
